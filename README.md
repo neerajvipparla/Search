@@ -105,6 +105,10 @@ Turn on **Settings › General › Let a script drive Search** and the running a
 
 Bench tabs are never selected for you, never enter the session or the history, and go when the script says so. It is how this browser is tested while somebody is using it.
 
+### Agent Runtime POC
+
+An **opt-in, local-only POC** lets Claude Code and Codex control separate Search sessions through an MCP companion. It is off in normal launches. See [Agent Runtime setup and limitations](docs/agent-runtime/README.md) before using it with real accounts. When enabled, Search opens a loopback control port and writes local runtime traces; Jev choices send a bounded, structured page summary to TypeSafe.
+
 ### Contributing
 
 Issues and pull requests are genuinely welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how this is reviewed and what tends to get merged. The short version: small changes, no new dependencies, nothing that phones home.

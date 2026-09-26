@@ -116,6 +116,13 @@ struct TabBar: View {
                     // Back, forward, reload, and the bookmarks, at the far end
                     // of the row. The dropdown hangs from the last one.
                     HStack(spacing: Metrics.tabGap) {
+                        if AgentRuntime.shared.isRunning {
+                            Image(systemName: "circle.fill")
+                                .font(.system(size: 7))
+                                .foregroundStyle(.green)
+                                .frame(width: 14, height: 14)
+                                .help("Search Agent Runtime is running locally")
+                        }
                         ExtensionSlot()
                         Helm(browser: browser)
                             .padding(.trailing, 8)
@@ -417,8 +424,7 @@ private struct TabPill: View {
                     Mark(icon: tab.icon, letter: tab.monogram, size: 15)
                 }
                 if tab.bench {
-                    // A script's tab, not yours.
-                    Image(systemName: "flask")
+                    Image(systemName: tab.agentOwner == nil ? "flask" : "person.crop.circle.badge.checkmark")
                         .font(.system(size: 9))
                         .foregroundStyle(colour.opacity(0.7))
                 }

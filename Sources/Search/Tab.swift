@@ -102,6 +102,8 @@ final class Tab: ObservableObject, Identifiable {
     @Published private(set) var address: URL?
     @Published private(set) var progress: Double = 0
     @Published private(set) var loading = false
+    /// Incremented on main-frame commit/failure so agent waits can distinguish a new navigation from old page readiness.
+    var agentNavigationVersion = 0
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
     /// Set when the page never arrived — no host, no network, a refused
@@ -233,6 +235,9 @@ final class Tab: ObservableObject, Identifiable {
     /// you, so it sees what you see — but never selected for you, never in
     /// the session or the history, and gone when the script is done.
     let bench: Bool
+
+    /// A visible runtime tab. The label is display-only; ownership is held by AgentRuntime.
+    @Published var agentOwner: String?
 
     /// The tab whose page opened this one, when a script did. Sign-in flows
     /// hand you back to it when they are done.
@@ -1309,5 +1314,3 @@ final class ScrollRelay: NSObject, WKScriptMessageHandler {
     })();
     """
 }
-
-

@@ -23,6 +23,22 @@ struct Page: View {
             // the tab stayed empty. Nothing, then the page, is a change.
             WebStage(page: tab.isBlank || tab.asleep || tab.floating ? nil : tab.web)
 
+            if let owner = tab.agentOwner {
+                Rectangle()
+                    .fill(.black.opacity(0.08))
+                    .overlay {
+                        VStack(spacing: 10) {
+                            Text("Controlled by \(owner)")
+                            Button("Take control") { _ = AgentRuntime.shared.takeOver(tab) }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        .font(.system(size: 13))
+                        .padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                    .help("Taking control detaches this tab from its agent session. Retry after an action finishes if needed.")
+            }
+
             if let cover = tab.cover {
                 // The page as it was left, while it is rebuilt underneath —
                 // anchored where the page itself starts, and never in the

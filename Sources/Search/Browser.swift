@@ -643,6 +643,9 @@ final class Browser: NSObject, ObservableObject {
         Shield.shared.compile()
         if #available(macOS 15.4, *) { Extensions.shared.start(for: self) }
         if prefs.bench { Bench.shared.start(for: self) }
+        if ProcessInfo.processInfo.environment["SEARCH_AGENT_RUNTIME"] == "1" {
+            AgentRuntime.shared.start(for: self)
+        }
         welcoming = !prefs.welcomed
         // Once a day, quietly: is there a newer one?
         Updater.shared.checkIfDue { [weak self] line in self?.announce(line) }
@@ -961,6 +964,8 @@ final class Browser: NSObject, ObservableObject {
     /// behind; closing that blank tab closes the window.
     func close(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        if tab.agentOwner != nil && !AgentRuntime.shared.prepareClose(tab) { return }
+        if tab.agentOwner != nil { tab.pin = nil }
 
         // A tab whose page is out in the little window takes the window with
         // it. Left alone, the window would go on holding a page belonging to a
@@ -1162,6 +1167,17 @@ final class Browser: NSObject, ObservableObject {
         prepare(tab)
         tabs.append(tab)
         tab.go(to: url)
+        return tab
+    }
+
+    /// Visible but absent from manual session restore, with the caller's WebKit store.
+    @discardableResult
+    func agentOpen(_ url: URL, configuration: WKWebViewConfiguration, owner: String) -> Tab {
+        let tab = Tab(bench: true, configuration: configuration)
+        tab.agentOwner = owner
+        prepare(tab)
+        tabs.append(tab)
+        if url.absoluteString != "about:blank" { tab.go(to: url) }
         return tab
     }
 
@@ -1689,6 +1705,9 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         for action: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
+        if let opener = tab(for: webView), opener.agentOwner != nil {
+            return AgentRuntime.shared.openPopup(from: opener, configuration: configuration, url: action.request.url)
+        }
         let from = tab(for: webView)?.id ?? activeID
         let tab = Tab(shy: tab(for: webView)?.shy ?? false, configuration: configuration)
         adopt(tab)
@@ -1802,6 +1821,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let tab = tab(for: webView) else { return }
+        tab.agentNavigationVersion += 1
         tab.failure = nil
         tab.typing = false
         // Whatever you last set this site to, before it draws a single frame
@@ -1839,6 +1859,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     }
 
     private func fail(_ webView: WKWebView, _ error: Error) {
+        tab(for: webView)?.agentNavigationVersion += 1
         tab(for: webView)?.uncover()
         let nsError = error as NSError
         let code = nsError.code
@@ -1947,9 +1968,4 @@ extension Browser: WKDownloadDelegate {
         return candidate
     }
 }
-
-
-
-
-
 

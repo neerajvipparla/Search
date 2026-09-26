@@ -457,7 +457,7 @@ private struct SideRow: View {
                 }
                 if tab.bench {
                     // A script's tab, not yours.
-                    Image(systemName: "flask")
+                    Image(systemName: tab.agentOwner == nil ? "flask" : "person.crop.circle.badge.checkmark")
                         .font(.system(size: 9))
                         .foregroundStyle(colour.opacity(0.7))
                 }
