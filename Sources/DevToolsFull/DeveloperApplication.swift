@@ -943,7 +943,9 @@ enum DeveloperApplication {
 
     /// Fetch only the cookies matching this URL without loading the profile's jar.
     private static func cookies(for address: URL, in web: WKWebView) async -> [HTTPCookie]? {
-#if compiler(>=6.4)
+// The macOS 27 SDK's WebKit (7625) has cookies(for:); a newer compiler with an
+// older SDK does not, so the SDK is what decides.
+#if compiler(>=6.4) && canImport(WebKit, _version: 7625)
         if #available(macOS 27, *) {
             return await web.configuration.websiteDataStore.httpCookieStore.cookies(for: address)
         }
