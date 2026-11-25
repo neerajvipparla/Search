@@ -8,7 +8,7 @@ agent's side is ./search-mcp, spoken to over stdio as Claude Code would.
 The window's question is answered through the bench's `agents` verb, which
 only a test run has.
 
-Checked: nothing happens until the question is answered, and only one agent
+Checked: nothing happens until the question is answered, up to eight agents
 at a time; the agent's own tab on a page served from 127.0.0.1, read with a
 password's value kept in the page; typing checked; a real click and the page
 it leads to; addresses Search won't go to and keys it won't press; a
@@ -46,6 +46,10 @@ sv.use("agent-control")
 ROOT = Path(__file__).resolve().parents[1]
 VERBOSE = "-v" in sys.argv
 AGENT_SOCK = f"{sv.SUPPORT}/Agent/agent.sock"
+
+
+class NoKeychain(Exception):
+    """This build can't remember agents: the "Always allow" checks are skipped."""
 
 FORM = """<!doctype html><title>form</title>
 <h1>Sign in</h1>
@@ -254,11 +258,44 @@ def main():
         tabs_before = {x["id"] for x in sv.cmd({"do": "tabs"})["tabs"]}
         t.ok("no agent tab yet", not any(x.get("bench") and x["id"] not in (yours,) for x in sv.cmd({"do": "tabs"})["tabs"]
                                         if x["url"].endswith("/form")), tabs_before)
-        other = raw_connect()
-        t.ok("a second agent is turned away", code(other) == "busy", other)
         agents("allow")
         opened, err = said("open_tab", {}, a.answer(n))
-        t.ok("allowed: its tab opens", not err and opened.get("page") == "p1" and opened["url"].endswith("/form"), opened)
+        page = opened.get("page")
+        t.ok("allowed: its tab opens", not err and page and opened["url"].endswith("/form"), opened)
+        absent, absent_error = a.tool("network_start", page=page)
+        t.ok("network capture needs the optional Full package", absent_error and code(absent) == "network_tools_unavailable", absent)
+        silent = []
+        try:
+            for _ in range(7):
+                c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                c.connect(AGENT_SOCK)
+                silent.append(c)
+            t.ok("eight connections can coexist", until(lambda: agents().get("sessions") == 8), agents())
+            other = raw_connect()
+            t.ok("the ninth is refused with capacity error", code(other) == "too_many_agents", other)
+        finally:
+            for c in silent:
+                c.close()
+        t.ok("silent connections release their slots", until(lambda: agents().get("sessions") == 1), agents())
+        concurrent = Client("codex"); clients.append(concurrent)
+        n2 = concurrent.send("tools/call", {"name": "open_tab", "arguments": {"url": f"{BASE}/second"}})
+        t.ok("second live agent gets its own question", until(lambda: agents().get("client") == "Codex" and agents().get("state") == "asking"), agents())
+        agents("allow", tabs=True)
+        second, err = said("open_tab", {}, concurrent.answer(n2))
+        t.ok("second live agent opens independently", not err and second.get("page") != page, second)
+        foreign, foreign_error = concurrent.tool("read_page", page=page)
+        t.ok("a page handle from another connection is stale", foreign_error and code(foreign) == "stale_page", foreign)
+        one, _ = a.tool("list_tabs")
+        two, _ = concurrent.tool("list_tabs")
+        t.ok("first agent cannot list second agent's tab", not any(x["url"].endswith("/second") for x in one["tabs"]), one)
+        t.ok("user-tab grant excludes the first agent's tab", not any(x["url"].endswith("/form") for x in two["tabs"]), two)
+        agents("stop", client="Codex")
+        stopped, stopped_error = concurrent.tool("list_tabs")
+        t.ok("Stop on one agent leaves the first running", stopped_error and code(stopped) == "stopped"
+             and agents().get("sessions") == 1, (stopped, agents()))
+        alive, alive_error = a.tool("list_tabs")
+        t.ok("first agent still answers after second Stop", not alive_error and len(alive.get("tabs", [])) == 1, alive)
+        concurrent.close()
         t.ok("allowed, without your tabs", agents().get("state") == "allowed" and agents().get("seesTabs") is False)
         first_tab = agents().get("workingOn")
         t.ok("the dot is on the tab it works in, and only there", first_tab and agents().get("marked") == [first_tab], agents())
@@ -266,7 +303,7 @@ def main():
         t.ok("Stop is drawn in the chrome, never over the page", st.get("pillDrawn") is True and st.get("overPage") is False, st)
 
         # ---- reading, with the password kept in the page
-        read, err = a.tool("read_page", page="p1")
+        read, err = a.tool("read_page", page=page)
         text = json.dumps(read)
         pw = node(read, "textbox", "Password") if not err else None
         t.ok("read_page gives controls with handles", not err and node(read, "textbox", "Name", ) and pw, read)
@@ -277,11 +314,11 @@ def main():
         typed, err = a.tool("type", element=pw["element"], text="new-secret-9", keys=True)
         t.ok("typing into the password, real keys, checked", not err and typed.get("verified") is True, typed)
         t.ok("and never says what it held", "holds" not in typed and "want" not in typed, typed)
-        again, _ = a.tool("read_page", page="p1")
+        again, _ = a.tool("read_page", page=page)
         t.ok("what was typed in the password stays in the page", "new-secret-9" not in json.dumps(again), again)
 
         # ---- a picture, blacked out where it must be
-        shot, err = a.tool("screenshot", page="p1")
+        shot, err = a.tool("screenshot", page=page)
         image = next((c for c in shot if c["type"] == "image"), None) if not err else None
         about = json.loads(next((c["text"] for c in shot if c["type"] == "text"), "{}")) if not err else {}
         t.ok("a picture of its own tab", image and base64.b64decode(image["data"])[:4] == b"\x89PNG", shot if err else about)
@@ -289,21 +326,21 @@ def main():
 
         # ---- refusals, decided in Search
         for bad in ("file:///etc/hosts", "search://settings", "search://passwords", "javascript:alert(1)"):
-            x, err = a.tool("navigate", page="p1", url=bad)
+            x, err = a.tool("navigate", page=page, url=bad)
             t.ok(f"won't go to {bad}", err and code(x) == "refused_address", x)
-        x, err = a.tool("press", page="p1", key="cmd+a")
+        x, err = a.tool("press", page=page, key="cmd+a")
         t.ok("no ⌘ keys", err and code(x) == "bad_key", x)
         for keys in ("ctrl+k", "ctrl+y"):
-            x, err = a.tool("press", page="p1", key=keys)
+            x, err = a.tool("press", page=page, key=keys)
             t.ok(f"H2: no {keys}", err and code(x) == "bad_key", x)
-        x, err = a.tool("press", page="p1", key="\u0019")
+        x, err = a.tool("press", page=page, key="\u0019")
         t.ok("no control character pressed", err and code(x) == "bad_key", x)
         x, err = a.tool("type", element=node(again, "textbox", "Name")["element"], text="a\u000bb")
         t.ok("no control character typed", err and code(x) == "bad_text", x)
-        x, err = a.tool("press", page="p1", key="Tab")
+        x, err = a.tool("press", page=page, key="Tab")
         t.ok("a named key is pressed", not err, x)
         for sel in ("input[value='hunter2-secret']", '[va\\lue^="h"]', '[v\\61lue^="h"]', "input:placeholder-shown"):
-            x, err = a.tool("wait_for", page="p1", selector=sel, timeout=1)
+            x, err = a.tool("wait_for", page=page, selector=sel, timeout=1)
             t.ok(f"H1: no selector {sel}", err and code(x) == "bad_condition", x)
         link = node(again, "link", "A file")
         x, err = a.tool("click", element=link["element"]) if link else ({}, True)
@@ -312,15 +349,15 @@ def main():
         t.ok("a page it doesn't have", err and code(x) == "stale_page", x)
 
         # ---- a real click and where it leads
-        again, _ = a.tool("read_page", page="p1")
+        again, _ = a.tool("read_page", page=page)
         x, err = a.tool("click", element=node(again, "button", "Send")["element"])
         t.ok("a real click submits the form", not err and x.get("navigated") is True, x)
         t.ok("L3: the address it is given keeps the password out", "new-secret-9" not in json.dumps(x) and "pw=redacted" in x.get("url", ""), x)
         time.sleep(1)
         t.ok("L7: no offer to save the password it signed in with", sv.cmd({"do": "probe"}).get("offering") is False)
-        x, err = a.tool("wait_for", page="p1", url="pw=new", timeout=1)
+        x, err = a.tool("wait_for", page=page, url="pw=new", timeout=1)
         t.ok("L3: the address's secret can't be waited on", err and code(x) == "timeout", x)
-        x, err = a.tool("wait_for", page="p1", text="Hello Ada")
+        x, err = a.tool("wait_for", page=page, text="Hello Ada")
         t.ok("wait_for the page it led to", not err and x.get("met") is True, x)
 
         # ---- M1: no camera, microphone, location or notifications
@@ -329,7 +366,7 @@ def main():
         st = agents()
         t.ok("the dot moves to the tab it works in now", st.get("workingOn") not in ("", first_tab)
              and st.get("marked") == [st.get("workingOn")], st)
-        a.tool("read_page", page="p1")
+        a.tool("read_page", page=page)
         st = agents()
         t.ok("and back again", st.get("workingOn") == first_tab and st.get("marked") == [first_tab], st)
         x, err = a.tool("wait_for", page=perm, text="notify=", timeout=8)
@@ -402,6 +439,8 @@ def main():
         t.ok("M4: a fresh click on the box ticks it", agents().get("wantsTabs") is True, agents())
         agents("click", on="allow")
         listed, err = said("list_tabs", {}, b.answer(n))
+        prior, prior_error = b.tool("read_page", page=page)
+        t.ok("a handle from a prior connection cannot resolve after reconnect", prior_error and code(prior) == "stale_page", prior)
         urls = [p["url"] for p in listed.get("tabs", [])] if not err else []
         t.ok("with your tabs: yours listed", any(u.endswith("/yours") for u in urls), listed)
         t.ok("never a private one", not any("private-one" in u for u in urls), urls)
@@ -496,6 +535,13 @@ def main():
             n = f.send("tools/call", {"name": "list_tabs", "arguments": {}})
             t.ok("always: asked", until(lambda: agents().get("state") == "asking"), agents())
             st = agents("draw")
+            if "nowhere safe" in st.get("noAlways", ""):
+                # An ad-hoc build without the profile's keychain group: no
+                # "Always allow" to check. What follows it still runs.
+                print("  skip always: this build has no keychain group (built without Search.provisionprofile)")
+                agents("deny")
+                f.close()
+                raise NoKeychain()
             t.ok("always: not offered when Python started it", st.get("offersAlways") is False
                  and "isn't an agent's own program" in st.get("noAlways", "") and st.get("alwaysDrawn") is False, st)
             try:
@@ -631,6 +677,8 @@ def main():
             m.close()
             time.sleep(11)
             agents("trust", client="Claude Code", requirement=requirement)
+        except NoKeychain:
+            pass
         finally:
             subprocess.run(["rm", "-rf", folder])
 
@@ -649,6 +697,21 @@ def main():
             t.ok("L4: a file that isn't a socket is refused", code(said_) == "not_search", said_)
         finally:
             subprocess.run(["rm", "-rf", fake])
+
+        # File/shortcut Stop All ends every live connection.
+        time.sleep(11)
+        all_clients = [Client("claude-code"), Client("codex")]
+        clients.extend(all_clients)
+        for client in all_clients:
+            pending = client.send("tools/call", {"name": "list_tabs", "arguments": {}})
+            t.ok("Stop All setup asks", until(lambda: agents().get("state") == "asking"), agents())
+            agents("allow")
+            said("list_tabs", {}, client.answer(pending))
+        t.ok("Stop All setup has two sessions", agents().get("sessions") == 2, agents())
+        agents("stop", all=True)
+        t.ok("Stop All releases both", until(lambda: agents().get("sessions") == 0), agents())
+        for client in all_clients:
+            client.close()
 
         # ---- the setting off: the socket goes
         agents("off")

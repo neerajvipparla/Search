@@ -1650,12 +1650,15 @@ struct SideBar: View {
     /// Between what plays in another tab and the foot's doors.
     private static let playerGap: CGFloat = 4
     /// The agent's card at the column's foot (AgentStatus).
-    private var agentCard: CGFloat { AgentStatus.cardHeight(row: rowHeight, auto: agents.session?.auto == true) }
+    private var agentCard: CGFloat {
+        agents.sessions(in: browser).filter { $0.consent.state == .allowed }
+            .reduce(0) { $0 + AgentStatus.cardHeight(row: rowHeight, auto: $1.auto) }
+    }
     /// "Update ready" is showing at the foot (UpdateNotice); not in the
     /// column of icons, where there is no room for its words.
     private var updateHere: Bool { !icons && UpdateNotice.shown(updater, prefs) != nil }
     /// An agent's pill is showing in this window (AgentControl).
-    private var agentHere: Bool { agents.shownIn == ObjectIdentifier(browser) }
+    private var agentHere: Bool { agentCard > 0 }
 
     @ViewBuilder
     private var newTab: some View {

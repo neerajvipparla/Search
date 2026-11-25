@@ -55,6 +55,7 @@ public final class FullPlugin: NSObject, SearchDevToolsPlugin, DevToolsOwner {
     }
 
     public func shutdown() {
+        AgentNetwork.stopAll()
         DeveloperTools.shared.close()
         DeveloperResponseMedia.clear()
         for session in shared.values {

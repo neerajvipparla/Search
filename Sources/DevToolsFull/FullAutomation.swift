@@ -16,6 +16,7 @@ enum FullAutomation {
                             plugin: FullPlugin) async -> [String: Any] {
         let tools = DeveloperTools.shared
         func session() -> DeveloperToolsSession? { tools.session?.web === web ? tools.session : nil }
+        if command.hasPrefix("network_") { return await AgentNetwork.perform(command, arguments, web: web) }
         switch command {
         case "open":
             plugin.open(arguments["item"] as? String ?? "devtools", webView: web)

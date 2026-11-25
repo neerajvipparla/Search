@@ -1,5 +1,6 @@
 import AppKit
 import OSLog
+import SearchPluginAPI
 import WebKit
 
 // A coding agent on this Mac — Claude Code, Codex — using the window you
@@ -232,6 +233,15 @@ enum AgentRules {
         return .success(out)
     }
 
+    /// A header whose value is a credential: cookies, authorization, and
+    /// anything named like a token, key, secret or session. Network reads
+    /// show these as "redacted" unless the agent asks for raw headers.
+    nonisolated static func secretHeader(_ name: String) -> Bool {
+        let name = name.lowercased()
+        if ["cookie", "set-cookie", "authorization", "proxy-authorization"].contains(name) { return true }
+        return name.range(of: #"token|secret|api-?key|auth|session|csrf|xsrf|password"#, options: .regularExpression) != nil
+    }
+
     /// An address as an agent is given it: the values of anything in its
     /// query or fragment named like a password, a code or a token taken out.
     /// A sign-in sent by GET, or a link back from one, carries them there.
@@ -354,7 +364,7 @@ struct AgentRefusal: Error {
     }
 }
 
-// MARK: - one connection
+// MARK: - one connection's state
 
 @MainActor
 final class AgentSession: ObservableObject, Identifiable {
@@ -372,6 +382,8 @@ final class AgentSession: ObservableObject, Identifiable {
     fileprivate(set) var asked = Date()
     /// The same moment on the clock events are stamped with.
     fileprivate(set) var askedUptime: TimeInterval = 0
+    fileprivate var queuedUptime: TimeInterval = 0
+    fileprivate var presentedQuestion = false
     /// "Let it see my open tabs", as ticked in the question so far.
     @Published fileprivate(set) var wantsTabs = false
     /// "Always allow", as ticked in the question so far.
@@ -418,6 +430,12 @@ final class AgentSession: ObservableObject, Identifiable {
     fileprivate var bytes = Data()
     fileprivate var inbox: [[String: Any]] = []
     fileprivate var working = false
+    fileprivate var watch: Timer?
+    @Published fileprivate(set) var networkAsking = false
+    fileprivate var networkAllowed = false
+    fileprivate var networkRefused = false
+    fileprivate var networkDecision: ((Bool) -> Void)?
+    fileprivate var networkCaptures: [Tab.ID: (key: String, web: WKWebView)] = [:]
     fileprivate var hello: (([String: Any]) -> Void)?
     fileprivate var pace = AgentPace()
 
@@ -428,6 +446,11 @@ final class AgentSession: ObservableObject, Identifiable {
     /// p1 → the number of its last read.
     fileprivate var snaps: [String: Int] = [:]
     private var counter = 0
+    weak var allowButton: NSView?
+    weak var refuseButton: NSView?
+    weak var tabsBox: NSView?
+    weak var alwaysBox: NSView?
+    weak var stopButton: NSView?
 
     fileprivate init(fd: Int32, program: String) {
         self.fd = fd
@@ -437,7 +460,7 @@ final class AgentSession: ObservableObject, Identifiable {
     fileprivate func handle(for tab: Tab) -> String {
         if let found = pages.first(where: { $0.value == tab.id }) { return found.key }
         counter += 1
-        let handle = "p\(counter)"
+        let handle = "p\(id.uuidString)_\(counter)"
         pages[handle] = tab.id
         return handle
     }
@@ -461,6 +484,8 @@ final class AgentControl: ObservableObject {
     static var socket: URL { folder.appendingPathComponent("agent.sock") }
     /// Past this much unsent, a client isn't reading, and is let go.
     static let most = 64 << 20
+    /// The same, for every connection's unsent answers added up.
+    static let mostAll = 128 << 20
     /// After Don't Allow or Stop, no new question for this long.
     static let quiet: TimeInterval = 10
     /// Asked nothing for this long, an allowed agent is shown as idle, and
@@ -472,14 +497,29 @@ final class AgentControl: ObservableObject {
     /// Where the element lists live in each page, apart from the bench's.
     private static let key = "__searchAgent"
 
-    /// The one connection there is, asking or allowed.
-    @Published private(set) var session: AgentSession?
+    /// Connections are keyed by an unguessable server-side identity. Order
+    /// also determines which consent question is shown first in a window.
+    @Published private(set) var sessions: [UUID: AgentSession] = [:]
+    private var order: [UUID] = []
+    private var owners: [Tab.ID: UUID] = [:]
+    var session: AgentSession? {
+        orderedSessions.filter { $0.consent.state == .asking || $0.networkAsking }
+            .min { $0.queuedUptime < $1.queuedUptime } ?? orderedSessions.first
+    }
+    var orderedSessions: [AgentSession] { order.compactMap { sessions[$0] } }
+    func sessions(in browser: Browser) -> [AgentSession] { orderedSessions.filter { $0.browser === browser } }
+    func question(in browser: Browser) -> AgentSession? {
+        sessions(in: browser).filter { $0.consent.state == .asking || $0.networkAsking }
+            .min { $0.queuedUptime < $1.queuedUptime }
+    }
+    private func contains(_ session: AgentSession) -> Bool { sessions[session.id] === session }
+    private func owner(of tab: Tab.ID) -> AgentSession? {
+        owners[tab].flatMap { sessions[$0] }
+    }
     private(set) var running = false
     private var listener: Int32 = -1
     private var accepting: DispatchSourceRead?
     private var quietUntil = Date.distantPast
-    /// Looks at an allowed agent every few seconds: busy, idle, gone idle.
-    private var watch: Timer?
     /// The window showing its Stop, for the column to make room for it.
     @Published private(set) var shownIn: ObjectIdentifier?
 
@@ -539,7 +579,7 @@ final class AgentControl: ObservableObject {
         }
         var there = stat()
         guard bound == 0, lstat(dir, &there) == 0, there.st_dev == info.st_dev, there.st_ino == info.st_ino,
-              fchmodat(folderFD, name, 0o600, AT_SYMLINK_NOFOLLOW) == 0, Darwin.listen(fd, 4) == 0 else {
+              fchmodat(folderFD, name, 0o600, AT_SYMLINK_NOFOLLOW) == 0, Darwin.listen(fd, 16) == 0 else {
             close(fd)
             unlinkat(folderFD, name, 0)
             return nil
@@ -549,7 +589,7 @@ final class AgentControl: ObservableObject {
     }
 
     func stop() {
-        if let session { end(session, "the setting was turned off") }
+        for session in orderedSessions { end(session, "the setting was turned off") }
         guard running else { return }
         accepting?.cancel()
         accepting = nil
@@ -575,16 +615,16 @@ final class AgentControl: ObservableObject {
         var quietly = Int32(1)
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &quietly, socklen_t(MemoryLayout<Int32>.size))
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
-        if session != nil || Date() < quietUntil {
-            let busy = session != nil
+        if sessions.count >= 8 || Date() < quietUntil {
+            let busy = sessions.count >= 8
             let refusal = AgentRefusal(
-                code: busy ? "busy" : "not_now",
-                message: busy ? "Another agent is using Search" : "Search was just told no, or stopped",
-                hint: busy ? "Wait for it to finish." : "Ask again in a few seconds, once."
+                code: busy ? "too_many_agents" : "not_now",
+                message: busy ? "Search already has eight coding agents" : "Search was just told no, or stopped",
+                hint: busy ? "Disconnect an agent and try again." : "Ask again in a few seconds, once."
             )
             Self.write(refusal.said, to: fd)
             close(fd)
-            Self.log.notice("refused a connection: \(busy ? "busy" : "too soon", privacy: .public)")
+            Self.log.notice("refused a connection: \(busy ? "capacity" : "too soon", privacy: .public)")
             return
         }
         let session = AgentSession(fd: fd, program: Self.program(of: fd))
@@ -597,12 +637,13 @@ final class AgentControl: ObservableObject {
         // writes a number that may already be someone else's.
         source.setCancelHandler { close(fd) }
         session.source = source
-        self.session = session
+        sessions[session.id] = session
+        order.append(session.id)
         source.resume()
         // A client that connects and says nothing doesn't keep the only
         // place: hello within a few seconds, or it is let go.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak session] in
-            guard let self, let session, self.session === session, !session.greeted else { return }
+            guard let self, let session, self.contains(session), !session.greeted else { return }
             end(session, "it said nothing")
         }
         Self.log.notice("connected: \(session.program, privacy: .public)")
@@ -662,7 +703,7 @@ final class AgentControl: ObservableObject {
     }
 
     private func say(_ answer: [String: Any], to session: AgentSession) {
-        guard self.session === session else { return }
+        guard contains(session) else { return }
         var out = (try? JSONSerialization.data(withJSONObject: answer)) ?? Data(#"{"error":{"code":"internal","message":"unwritable answer"}}"#.utf8)
         out.append(0x0A)
         session.outbox.append(out)
@@ -670,6 +711,14 @@ final class AgentControl: ObservableObject {
             session.outbox = Data()
             end(session, "it stopped reading")
             return
+        }
+        // All of them together, too: the one furthest behind goes, not
+        // whichever happened to answer last.
+        if sessions.values.reduce(0, { $0 + $1.outbox.count }) > Self.mostAll,
+           let worst = sessions.values.max(by: { $0.outbox.count < $1.outbox.count }) {
+            worst.outbox = Data()
+            end(worst, "it stopped reading")
+            if worst === session { return }
         }
         flush(session)
     }
@@ -681,7 +730,7 @@ final class AgentControl: ObservableObject {
             if sent > 0 { session.outbox.removeFirst(sent); continue }
             if sent < 0, errno == EAGAIN { break }
             session.outbox = Data()
-            if self.session === session, session.consent.state != .ended { end(session, "the connection closed") }
+            if contains(session), session.consent.state != .ended { end(session, "the connection closed") }
             return
         }
         if session.outbox.isEmpty {
@@ -706,7 +755,7 @@ final class AgentControl: ObservableObject {
 
     /// The next request, once the one before has its answer, at the pace.
     private func pump(_ session: AgentSession) {
-        guard self.session === session, !session.working, let request = session.inbox.first else { return }
+        guard contains(session), !session.working, let request = session.inbox.first else { return }
         let verb = request["do"] as? String ?? ""
         switch session.consent.verdict(for: verb) {
         case .wait:
@@ -728,7 +777,7 @@ final class AgentControl: ObservableObject {
         }
         let delay = verb == "hello" ? 0 : session.pace.delay(at: ProcessInfo.processInfo.systemUptime)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak session] in
-            guard let self, let session, self.session === session else { return }
+            guard let self, let session, self.contains(session) else { return }
             var answered = false
             let answer: ([String: Any]) -> Void = { [weak self, weak session] out in
                 guard !answered, let self, let session else { return }
@@ -743,7 +792,7 @@ final class AgentControl: ObservableObject {
             // One answer, always: a page that never replies doesn't hold the
             // agent, or the next request, for ever. You, answering the
             // question, are not on a clock.
-            if verb != "hello" {
+            if verb != "hello" && verb != "network_start" && !(verb == "open" && request["capture_network"] as? Bool == true) {
                 let patience = min(60, (request["timeout"] as? Double ?? 20) + 15)
                 DispatchQueue.main.asyncAfter(deadline: .now() + patience) {
                     answer(AgentRefusal(code: "no_answer", message: "No answer within \(Int(patience)) s").said)
@@ -770,13 +819,21 @@ final class AgentControl: ObservableObject {
 
     // MARK: ending
 
-    /// Stop: the column's foot, the strip, File › Stop Agent.
+    /// Stop from one card, or all from the File menu.
+    func stopSession(_ id: UUID) {
+        if let session = sessions[id] { end(session, "stopped from the window") }
+    }
+
     func stopSession() {
         if let session { end(session, "stopped from the window") }
     }
 
+    func stopAllSessions() {
+        for session in orderedSessions { end(session, "stopped from the window") }
+    }
+
     private func end(_ session: AgentSession, _ why: String) {
-        guard self.session === session else { return }
+        guard contains(session) else { return }
         let was = session.consent.state
         // Stopped, let in without asking or not: never let in again without
         // asking, until you tick "Always allow" for it again in the question.
@@ -786,6 +843,16 @@ final class AgentControl: ObservableObject {
         }
         session.hello?(AgentRefusal(code: "stopped", message: "Stopped in Search").said)
         session.hello = nil
+        session.networkDecision = nil
+        session.networkAsking = false
+        session.networkAllowed = false
+        for capture in session.networkCaptures.values {
+            DevToolsPackages.shared.plugin("full")?.perform("network_stop", arguments: ["capture": capture.key],
+                                                            webView: capture.web) { _ in }
+        }
+        session.networkCaptures = [:]
+        for id in session.own { owners[id] = nil }
+        session.own = []
         session.consent.end()
         // What was said last goes if the socket takes it now; nothing waits.
         flush(session)
@@ -797,10 +864,11 @@ final class AgentControl: ObservableObject {
         session.source?.cancel()
         session.source = nil
         work(on: nil, session)
-        self.session = nil
-        watch?.invalidate()
-        watch = nil
-        shownIn = nil
+        session.watch?.invalidate()
+        session.watch = nil
+        sessions[session.id] = nil
+        order.removeAll { $0 == session.id }
+        shownIn = orderedSessions.first(where: { $0.consent.state == .allowed })?.browser.map(ObjectIdentifier.init)
         // A question you said no to, walked away from, or an agent you
         // stopped, doesn't come straight back.
         if was == .refused || was == .asking || (was == .allowed && why.hasPrefix("stopped")) {
@@ -813,47 +881,73 @@ final class AgentControl: ObservableObject {
     /// Asked again before every step that touches a page, so nothing it
     /// asked for runs after Stop.
     private func live(_ session: AgentSession) -> Bool {
-        self.session === session && session.consent.state == .allowed
+        contains(session) && session.consent.state == .allowed
     }
 
     // MARK: answering the question
 
     /// The question's controls as drawn (AgentBanner), so a click can be
     /// told to have landed on the one it presses.
-    weak var allowButton: NSView?
-    weak var refuseButton: NSView?
-    weak var tabsBox: NSView?
-    weak var alwaysBox: NSView?
-    /// Stop, as drawn: in the column's foot or the strip.
-    weak var stopButton: NSView?
-
     private func clicked(_ event: NSEvent?, on view: NSView?, _ session: AgentSession) -> Bool {
         let ok = AgentRules.isClick(event, on: view, in: session.browser?.window, after: session.askedUptime + 0.5)
         if !ok { Self.log.notice("a press that was no fresh click on the question was ignored") }
         return ok
     }
 
+    func questionShown(_ id: UUID) {
+        guard let session = sessions[id], let browser = session.browser,
+              question(in: browser) === session, !session.presentedQuestion else { return }
+        session.asked = Date()
+        session.askedUptime = ProcessInfo.processInfo.systemUptime
+        session.presentedQuestion = true
+    }
+
     /// Allow or Don't Allow, from the question in the window: only a fresh
     /// mouse click on that button (AgentRules.isClick).
+    func answer(_ id: UUID, allow: Bool, event: NSEvent?) {
+        guard let session = sessions[id], let browser = session.browser,
+              question(in: browser) === session,
+              clicked(event, on: allow ? session.allowButton : session.refuseButton, session) else { return }
+        if session.networkAsking {
+            session.networkAsking = false
+            session.networkAllowed = allow
+            session.networkRefused = !allow
+            let decision = session.networkDecision
+            session.networkDecision = nil
+            objectWillChange.send()
+            decision?(allow)
+            return
+        }
+        decide(session, allow: allow, seesTabs: session.wantsTabs, now: Date())
+    }
+
     func answer(allow: Bool, event: NSEvent?) {
-        guard let session, session.consent.state == .asking,
-              clicked(event, on: allow ? allowButton : refuseButton, session) else { return }
-        decide(allow: allow, seesTabs: session.wantsTabs, now: Date())
+        if let session { answer(session.id, allow: allow, event: event) }
     }
 
     /// "Let it see my open tabs", ticked or unticked: the same click, on
     /// the box.
-    func toggleTabs(event: NSEvent?) {
-        guard let session, session.consent.state == .asking, clicked(event, on: tabsBox, session) else { return }
+    func toggleTabs(_ id: UUID, event: NSEvent?) {
+        guard let session = sessions[id], let browser = session.browser,
+              question(in: browser) === session, clicked(event, on: session.tabsBox, session) else { return }
         session.wantsTabs.toggle()
+    }
+
+    func toggleTabs(event: NSEvent?) {
+        if let session { toggleTabs(session.id, event: event) }
     }
 
     /// "Always allow", ticked or unticked: the same click, on that box, and
     /// only where it is offered.
-    func toggleAlways(event: NSEvent?) {
-        guard let session, session.consent.state == .asking, session.noAlways == nil,
-              clicked(event, on: alwaysBox, session) else { return }
+    func toggleAlways(_ id: UUID, event: NSEvent?) {
+        guard let session = sessions[id], let browser = session.browser,
+              question(in: browser) === session, session.noAlways == nil,
+              clicked(event, on: session.alwaysBox, session) else { return }
         session.wantsAlways.toggle()
+    }
+
+    func toggleAlways(event: NSEvent?) {
+        if let session { toggleAlways(session.id, event: event) }
     }
 
     /// For the bench's `agents click`: a mouse-up made as a hand's would
@@ -861,10 +955,10 @@ final class AgentControl: ObservableObject {
     /// the question was up.
     func madeClick(on which: String, inside: Bool, stale: Bool) -> NSEvent? {
         let view: NSView? = switch which {
-        case "allow": allowButton
-        case "tabs": tabsBox
-        case "always": alwaysBox
-        default: refuseButton
+        case "allow": session?.allowButton
+        case "tabs": session?.tabsBox
+        case "always": session?.alwaysBox
+        default: session?.refuseButton
         }
         guard let session, let view, let window = view.window else { return nil }
         let middle = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
@@ -879,7 +973,10 @@ final class AgentControl: ObservableObject {
     func showForTest(_ client: String?, in browser: Browser? = nil, busy: Bool = true,
                      auto: Bool = false, justAdmitted: Bool = false) {
         guard Store.testing else { return }
-        guard let client, let browser else { session = nil; shownIn = nil; return }
+        guard let client, let browser else { sessions = [:]; order = []; owners = [:]; shownIn = nil; return }
+        sessions = [:]
+        order = []
+        owners = [:]
         let session = AgentSession(fd: -1, program: "test")
         session.client = client
         session.browser = browser
@@ -888,22 +985,35 @@ final class AgentControl: ObservableObject {
         session.busy = busy
         session.auto = auto
         session.justAdmitted = justAdmitted
-        self.session = session
+        sessions[session.id] = session
+        order.append(session.id)
         shownIn = ObjectIdentifier(browser)
     }
 
     /// The bench's answer, in a test run (Bench `agents`).
     func answerForTest(allow: Bool, seesTabs: Bool, always: Bool = false, simulate: Bool = false) {
         guard Store.testing else { return }
+        if let session, session.networkAsking {
+            session.networkAsking = false
+            session.networkAllowed = allow
+            session.networkRefused = !allow
+            let decision = session.networkDecision
+            session.networkDecision = nil
+            objectWillChange.send()
+            decision?(allow)
+            return
+        }
         if always, let session, session.noAlways == nil { session.wantsAlways = true }
         // "Always" ticked for the launcher a harness can't sign (see decide).
         if simulate, let session { session.wantsAlways = true; session.simulated = true }
-        decide(allow: allow, seesTabs: seesTabs, now: .distantFuture)
+        if let session { decide(session, allow: allow, seesTabs: seesTabs, now: .distantFuture) }
     }
 
-    private func decide(allow: Bool, seesTabs: Bool, now: Date) {
-        guard let session, session.consent.state == .asking, now.timeIntervalSince(session.asked) > 0.5 else { return }
+    private func decide(_ session: AgentSession, allow: Bool, seesTabs: Bool, now: Date) {
+        guard contains(session), session.consent.state == .asking,
+              now.timeIntervalSince(session.asked) > 0.5 else { return }
         session.consent.answer(allow: allow, seesTabs: seesTabs)
+        objectWillChange.send()
         Self.log.notice("\(allow ? "allowed" : "not allowed", privacy: .public)\(allow && seesTabs ? ", with your tabs" : "", privacy: .public)")
         // Remembered only as ticked, and only a program that can be: the
         // box isn't there otherwise, and this says so again.
@@ -944,6 +1054,13 @@ final class AgentControl: ObservableObject {
         session.consent.hello()
         session.asked = Date()
         session.askedUptime = ProcessInfo.processInfo.systemUptime
+        session.queuedUptime = session.askedUptime
+        session.presentedQuestion = false
+        objectWillChange.send()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 110) { [weak self, weak session] in
+            guard let self, let session, self.contains(session), session.consent.state == .asking else { return }
+            self.end(session, "question timed out")
+        }
         guard let entry = AgentTrust.match(client: session.client, launcher: session.launcher, passed: passed,
                                            among: trust.remembered) else {
             if !trust.requirements(for: session.client).isEmpty {
@@ -955,6 +1072,7 @@ final class AgentControl: ObservableObject {
         session.admittedBy = entry.id
         // Your tabs never without a click of yours in the question.
         session.consent.answer(allow: true, seesTabs: false)
+        objectWillChange.send()
         var seen = entry
         seen.path = session.launcher?.path ?? entry.path
         trust.used(seen)
@@ -992,10 +1110,10 @@ final class AgentControl: ObservableObject {
         session.stirred = Date()
         session.busy = true
         shownIn = session.browser.map(ObjectIdentifier.init)
-        watch?.invalidate()
-        watch = Timer.scheduledTimer(withTimeInterval: Store.testing ? 0.5 : 2, repeats: true) { [weak self, weak session] _ in
+        session.watch?.invalidate()
+        session.watch = Timer.scheduledTimer(withTimeInterval: Store.testing ? 0.5 : 2, repeats: true) { [weak self, weak session] _ in
             MainActor.assumeIsolated {
-                guard let self, let session, self.session === session, session.consent.state == .allowed else { return }
+                guard let self, let session, self.contains(session), session.consent.state == .allowed else { return }
                 self.look(at: session, now: Date())
             }
         }
@@ -1028,7 +1146,7 @@ final class AgentControl: ObservableObject {
 
     /// Whether the drawn Stop sits over the page you are looking at: never.
     private var stopOverPage: Bool {
-        guard let stop = stopButton, let window = stop.window,
+        guard let stop = session?.stopButton, let window = stop.window,
               let page = session?.browser?.active?.built, page.window === window else { return false }
         let spot = stop.convert(stop.bounds, to: nil)
         return page.convert(page.bounds, to: nil).intersects(spot)
@@ -1038,7 +1156,8 @@ final class AgentControl: ObservableObject {
     var state: [String: Any] {
         // Every tab wearing the dot, in every window.
         let marked = Browsers.all.flatMap(\.tabs).filter(\.agentWorking).map { Bench.short($0) }
-        guard let session else { return ["running": running, "connected": false, "pillDrawn": stopButton?.window != nil, "marked": marked] }
+        guard let session else { return ["running": running, "connected": false, "sessions": 0,
+                                   "pillDrawn": false, "marked": marked] }
         let state: String = switch session.consent.state {
         case .connected: "connected"
         case .asking: "asking"
@@ -1046,13 +1165,14 @@ final class AgentControl: ObservableObject {
         case .refused: "refused"
         case .ended: "ended"
         }
-        return ["running": running, "connected": true, "state": state, "client": session.client,
+        return ["running": running, "connected": true, "sessions": sessions.count, "state": state,
+                "networkAsking": session.networkAsking, "client": session.client,
                 "program": session.program, "seesTabs": session.consent.seesTabs, "wantsTabs": session.wantsTabs,
-                "drawn": allowButton?.window != nil && tabsBox?.window != nil,
+                "drawn": session.allowButton?.window != nil && session.tabsBox?.window != nil,
                 "own": session.own.count, "auto": session.auto, "justAdmitted": session.justAdmitted, "admissions": admissions, "wantsAlways": session.wantsAlways,
                 "offersAlways": session.noAlways == nil, "noAlways": session.noAlways ?? "",
-                "alwaysDrawn": alwaysBox?.window != nil, "busy": session.busy,
-                "pillDrawn": stopButton?.window != nil, "overPage": stopOverPage,
+                "alwaysDrawn": session.alwaysBox?.window != nil, "busy": session.busy,
+                "pillDrawn": session.stopButton?.window != nil, "overPage": stopOverPage,
                 "workingOn": session.workingOn.map { Bench.short($0) } ?? "", "marked": marked,
                 "launcher": session.launcher.map { ["path": $0.path, "identifier": $0.identifier, "team": $0.team,
                                                      "adhoc": $0.adhoc, "signed": $0.signed] } ?? [:]]
@@ -1060,11 +1180,117 @@ final class AgentControl: ObservableObject {
 
     /// A tab an agent's tab opened (Browser's createWebViewWith): its own too.
     func adopted(_ tab: Tab, from opener: Tab) {
-        guard let session, session.own.contains(opener.id) else { return }
+        guard let session = owner(of: opener.id) else { return }
         session.own.insert(tab.id)
+        owners[tab.id] = session.id
+    }
+
+    func closed(_ tab: Tab) {
+        guard let session = owner(of: tab.id) else { return }
+        if let capture = session.networkCaptures.removeValue(forKey: tab.id) {
+            DevToolsPackages.shared.plugin("full")?.perform("network_stop", arguments: ["capture": capture.key],
+                                                            webView: capture.web) { _ in }
+        }
+        session.own.remove(tab.id)
+        owners[tab.id] = nil
+        for handle in session.pages.compactMap({ $0.value == tab.id ? $0.key : nil }) { session.forget(handle) }
+        if session.workingOn === tab { work(on: nil, session) }
     }
 
     // MARK: - the verbs
+
+    private func withNetworkPermission(_ session: AgentSession, _ answer: @escaping ([String: Any]) -> Void,
+                                       then: @escaping () -> Void) {
+        if session.networkAllowed { then(); return }
+        if session.networkRefused {
+            answer(AgentRefusal(code: "network_not_allowed", message: "Network inspection was not allowed").said)
+            return
+        }
+        session.asked = Date()
+        session.askedUptime = ProcessInfo.processInfo.systemUptime
+        session.queuedUptime = session.askedUptime
+        session.presentedQuestion = false
+        session.networkAsking = true
+        session.networkDecision = { [weak self, weak session] allowed in
+            guard let self, let session, self.live(session) else { return }
+            if allowed { then() }
+            else { answer(AgentRefusal(code: "network_not_allowed", message: "Network inspection was not allowed").said) }
+        }
+        objectWillChange.send()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 110) { [weak self, weak session] in
+            guard let self, let session, self.contains(session), session.networkAsking else { return }
+            session.networkAsking = false
+            session.networkRefused = true
+            let decision = session.networkDecision
+            session.networkDecision = nil
+            self.objectWillChange.send()
+            decision?(false)
+        }
+    }
+
+    private func networkCall(_ command: String, on tab: Tab, session: AgentSession,
+                             args: [String: Any], _ answer: @escaping ([String: Any]) -> Void) {
+        guard live(session), owner(of: tab.id) === session else {
+            answer(AgentRefusal(code: "stopped", message: "This agent no longer owns the tab").said)
+            return
+        }
+        guard let plugin = DevToolsPackages.shared.plugin("full") else {
+            answer(AgentRefusal(code: "network_tools_unavailable", message: "Developer Tools Full is not installed or available",
+                                hint: "Install Developer Tools Full in Search Settings › About › Developer.").said)
+            return
+        }
+        let key = session.networkCaptures[tab.id]?.key ?? UUID().uuidString
+        let web = session.networkCaptures[tab.id]?.web ?? tab.web
+        var arguments = args
+        arguments["capture"] = key
+        arguments["owner"] = session.id.uuidString
+        if command == "network_start" { session.networkCaptures[tab.id] = (key, web) }
+        plugin.perform(command, arguments: arguments, webView: web) { [weak self, weak session] result in
+            Task { @MainActor in
+                // Always one answer: network calls are off the request clock
+                // (they may wait on the question), so silence would hang it.
+                guard let self, let session, self.live(session), self.owner(of: tab.id) === session,
+                      session.browser?.tabs.contains(where: { $0.id == tab.id }) == true else {
+                    session?.networkCaptures[tab.id] = nil
+                    answer(AgentRefusal(code: "stale_page", message: "The tab closed or the agent stopped").said)
+                    return
+                }
+                if let code = result["error"] as? String {
+                    if command == "network_start" || code == "capture_interrupted" { session.networkCaptures[tab.id] = nil }
+                    let hint: String = switch code {
+                    case "inspector_in_use": "Close Developer Tools on that tab, or capture in another tab."
+                    case "capture_interrupted": "Developer Tools opened on that tab. Call network_start again once it is closed."
+                    case "too_many_captures": "Stop capture on your other tab first (network_stop)."
+                    default: ""
+                    }
+                    let said = result["message"] as? String ?? code.replacingOccurrences(of: "_", with: " ")
+                    answer(AgentRefusal(code: code, message: said, hint: hint).said)
+                    return
+                }
+                if command == "network_stop" { session.networkCaptures[tab.id] = nil }
+                var safe = result
+                if let rows = safe["requests"] as? [[String: Any]] {
+                    safe["requests"] = rows.map { row -> [String: Any] in
+                        var row = row
+                        if let url = row["url"] as? String { row["url"] = AgentRules.url(url) }
+                        return row
+                    }
+                }
+                if let url = safe["url"] as? String { safe["url"] = AgentRules.url(url) }
+                if args["raw_headers"] as? Bool != true {
+                    for key in ["request_headers", "response_headers"] {
+                        guard let pairs = safe[key] as? [[String]] else { continue }
+                        safe[key] = pairs.map { pair in
+                            guard pair.count == 2, AgentRules.secretHeader(pair[0]) else { return pair }
+                            return [pair[0], "redacted"]
+                        }
+                    }
+                    safe["headers_redacted"] = true
+                }
+                answer(safe)
+            }
+        }
+    }
 
     private func run(_ verb: String, _ request: [String: Any], in session: AgentSession, _ answer: @escaping ([String: Any]) -> Void) {
         func refuse(_ refusal: AgentRefusal) { answer(refusal.said) }
@@ -1092,7 +1318,7 @@ final class AgentControl: ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async { [weak self, weak session] in
                 let seen = token.flatMap { AgentIdentity.examine($0, against: requirements) }
                 DispatchQueue.main.async {
-                    guard let self, let session, self.session === session, session.consent.state == .connected else { return }
+                    guard let self, let session, self.contains(session), session.consent.state == .connected else { return }
                     session.launcher = seen?.launcher
                     self.greet(session, passed: seen?.passed ?? [])
                 }
@@ -1112,11 +1338,39 @@ final class AgentControl: ObservableObject {
                 tabs(session, browser, answer)
             case "open":
                 guard let url = AgentRules.address(request["url"] as? String ?? "") else { throw Self.badAddress }
-                let tab = browser.benchOpen(url, agent: true)
+                let capture = request["capture_network"] as? Bool == true
+                if capture {
+                    guard DevToolsPackages.shared.plugin("full") != nil else {
+                        throw AgentRefusal(code: "network_tools_unavailable", message: "Developer Tools Full is not installed or available",
+                                           hint: "Install Developer Tools Full in Search Settings › About › Developer.")
+                    }
+                    if !session.networkAllowed {
+                        withNetworkPermission(session, answer) { [weak self, weak session] in
+                            if let self, let session { self.run(verb, request, in: session, answer) }
+                        }
+                        return
+                    }
+                }
+                let tab = browser.benchOpen(url, agent: true, load: false)
                 session.own.insert(tab.id)
+                owners[tab.id] = session.id
                 work(on: tab, session)
                 PageRoom.shared.house(tab)
-                settle(tab, session, timeout: request["timeout"] as? Double ?? 20, answer)
+                if capture {
+                    networkCall("network_start", on: tab, session: session, args: [:]) { [weak self] result in
+                        if result["error"] != nil {
+                            browser.close(tab)
+                            session.own.remove(tab.id)
+                            answer(result)
+                        } else {
+                            tab.go(to: url)
+                            self?.settle(tab, session, timeout: request["timeout"] as? Double ?? 20, answer)
+                        }
+                    }
+                } else {
+                    tab.go(to: url)
+                    settle(tab, session, timeout: request["timeout"] as? Double ?? 20, answer)
+                }
             case "go":
                 let tab = try self.tab(request, session, browser, .drive)
                 guard let url = AgentRules.address(request["url"] as? String ?? "") else { throw Self.badAddress }
@@ -1134,8 +1388,11 @@ final class AgentControl: ObservableObject {
             case "close":
                 let tab = try self.tab(request, session, browser, .drive)
                 let handle = request["page"] as? String ?? ""
+                if let capture = session.networkCaptures.removeValue(forKey: tab.id) {
+                    DevToolsPackages.shared.plugin("full")?.perform("network_stop", arguments: ["capture": capture.key],
+                                                                    webView: capture.web) { _ in }
+                }
                 browser.close(tab)
-                session.own.remove(tab.id)
                 session.forget(handle)
                 answer(["closed": handle])
             case "read":
@@ -1162,6 +1419,23 @@ final class AgentControl: ObservableObject {
                 try waitFor(request, session, browser, answer)
             case "shot":
                 try shot(request, session, browser, answer)
+            case "network_start", "network_requests", "network_request", "network_stop":
+                let tab = try self.tab(request, session, browser, .drive)
+                if verb == "network_start" {
+                    guard DevToolsPackages.shared.plugin("full") != nil else {
+                        throw AgentRefusal(code: "network_tools_unavailable", message: "Developer Tools Full is not installed or available",
+                                           hint: "Install Developer Tools Full in Search Settings › About › Developer.")
+                    }
+                    withNetworkPermission(session, answer) { [weak self] in
+                        self?.networkCall(verb, on: tab, session: session, args: request, answer)
+                    }
+                } else if !session.networkAllowed {
+                    throw AgentRefusal(code: "network_not_allowed", message: "Network inspection was not allowed")
+                } else if session.networkCaptures[tab.id] == nil {
+                    throw AgentRefusal(code: "stale_request", message: "No active capture for that page")
+                } else {
+                    networkCall(verb, on: tab, session: session, args: request, answer)
+                }
             case "bye":
                 answer(["bye": true])
                 DispatchQueue.main.async { [weak self] in self?.end(session, "it said goodbye") }
@@ -1185,7 +1459,11 @@ final class AgentControl: ObservableObject {
     private func tab(_ request: [String: Any], _ session: AgentSession, _ browser: Browser, _ use: AgentConsent.Use) throws -> Tab {
         let handle = request["page"] as? String ?? ""
         let found = session.pages[handle].flatMap { id in browser.tabs.first { $0.id == id } }
-        let refusal = found.map { AgentRules.refusal(for: $0, own: session.own.contains($0.id), consent: session.consent, use: use) }
+        if let found, let owner = owner(of: found.id), owner !== session {
+            session.forget(handle)
+            throw AgentRefusal(code: "stale_page", message: "That page belongs to another agent")
+        }
+        let refusal = found.map { AgentRules.refusal(for: $0, own: owner(of: $0.id) === session, consent: session.consent, use: use) }
             ?? "stale_page"
         switch refusal {
         case nil:
@@ -1234,9 +1512,15 @@ final class AgentControl: ObservableObject {
             done(.failure(AgentRefusal(code: "asleep", message: "That tab is asleep, and isn't woken for an agent")))
             return
         }
+        let wasOwn = owner(of: tab.id) === session
         web.evaluateJavaScript(script, in: nil, in: Web.world) { [weak self] result in
             guard let self, live(session) else {
                 done(.failure(AgentRefusal(code: "stopped", message: "Stopped in Search")))
+                return
+            }
+            guard session.browser?.tabs.contains(where: { $0.id == tab.id }) == true,
+                  (wasOwn ? owner(of: tab.id) === session : owner(of: tab.id) == nil) else {
+                done(.failure(AgentRefusal(code: "stale_page", message: "The tab closed while reading")))
                 return
             }
             switch result {
@@ -1270,10 +1554,20 @@ final class AgentControl: ObservableObject {
     private func settle(_ tab: Tab, _ session: AgentSession, timeout: Double, _ answer: @escaping ([String: Any]) -> Void) {
         let limit = Date().addingTimeInterval(min(max(timeout, 0), 30))
         func look() {
+            guard live(session), owner(of: tab.id) === session,
+                  session.browser?.tabs.contains(where: { $0.id == tab.id }) == true else {
+                answer(AgentRefusal(code: "stale_page", message: "The tab closed while waiting").said)
+                return
+            }
             if !tab.loading, tab.address != nil {
                 // A beat for the document's own scripts to settle.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                     guard let self else { return }
+                    guard live(session), owner(of: tab.id) === session,
+                          session.browser?.tabs.contains(where: { $0.id == tab.id }) == true else {
+                        answer(AgentRefusal(code: "stale_page", message: "The tab closed while waiting").said)
+                        return
+                    }
                     answer(describe(tab, session))
                 }
                 return
@@ -1292,13 +1586,14 @@ final class AgentControl: ObservableObject {
     private func tabs(_ session: AgentSession, _ browser: Browser, _ answer: @escaping ([String: Any]) -> Void) {
         let live = Set(browser.tabs.map(\.id))
         for (handle, id) in session.pages where !live.contains(id) { session.forget(handle) }
-        session.own.formIntersection(live)
+        for id in session.own.subtracting(live) { session.own.remove(id); owners[id] = nil }
         let shown = browser.tabs.filter { tab in
-            AgentRules.refusal(for: tab, own: session.own.contains(tab.id), consent: session.consent, use: .read) == nil
+            if let owner = owner(of: tab.id), owner !== session { return false }
+            return AgentRules.refusal(for: tab, own: owner(of: tab.id) === session, consent: session.consent, use: .read) == nil
         }
         answer(["tabs": shown.map { tab -> [String: Any] in
             var out = describe(tab, session)
-            out["mine"] = session.own.contains(tab.id)
+            out["mine"] = owner(of: tab.id) === session
             return out
         }])
     }
@@ -1314,7 +1609,7 @@ final class AgentControl: ObservableObject {
             case .failure(let refusal): answer(refusal.said)
             case .success(var out):
                 session.snaps[handle] = snap
-                let own = session.own.contains(tab.id)
+                let own = self.owner(of: tab.id) === session
                 out["nodes"] = (out["nodes"] as? [[String: Any]] ?? []).map { node in
                     var node = node
                     let index = node.removeValue(forKey: "e") as? Int ?? -1
@@ -1427,7 +1722,7 @@ final class AgentControl: ObservableObject {
         let tab = try self.tab(request, session, browser, .read)
         let timeout = min(max(request["timeout"] as? Double ?? 10, 0), 30)
         let condition: AgentRules.Condition
-        switch AgentRules.condition(request, own: session.own.contains(tab.id)) {
+        switch AgentRules.condition(request, own: owner(of: tab.id) === session) {
         case .failure(let refusal): throw refusal
         case .success(let made): condition = made
         }

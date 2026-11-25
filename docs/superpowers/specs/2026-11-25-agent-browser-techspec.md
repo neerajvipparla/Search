@@ -1,6 +1,6 @@
 # Search as a browser for coding agents — technical specification
 
-Status: proposed. Scope: bare MCP browser control, concurrent agents, and network inspection. No autonomous action model or task runner is part of this version.
+Status: approved. Scope: bare MCP browser control, concurrent agents, and network inspection. No autonomous action model or task runner is part of this version.
 
 ## Outcome
 
@@ -44,7 +44,7 @@ Network tools are for the agent's own tabs only. They do not open the visible De
 | --- | --- | --- |
 | `network_start` | `page` | Starts capture of requests initiated after attachment, including future navigation; returns capture state. The first network call in a session asks for separate, session-only consent. |
 | `network_requests` | `page`, optional `limit` (1–100) | Recent requests in chronological order: opaque request handle, scrubbed URL, method, type, status, duration if known, failed/cached flags, plus count of evicted requests. |
-| `network_request` | `page`, request handle | One request's metadata, request/response headers, request body and text response body when WebKit supplies them; explicit unavailable/truncated flags. |
+| `network_request` | `page`, request handle, optional `raw_headers` | One request's metadata, request/response headers (cookie, authorization and token-like values shown as `redacted` unless `raw_headers: true`), request body and text response body when WebKit supplies them; explicit unavailable/truncated flags. |
 | `network_stop` | `page` | Stops capture and releases its inspector state. |
 
 - The extra consent question says network details may contain cookies, authorization headers, tokens, and private response data. It is off by default, applies to this connection only, is never remembered by **Always allow**, and is revoked immediately on Stop/disconnect. No network data is returned while that question is pending or after refusal. Raw headers and bodies are available only after this explicit grant; the UI should not imply that field-name redaction can make an arbitrary response safe.

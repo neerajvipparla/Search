@@ -180,6 +180,17 @@ final class AgentControlTests: XCTestCase {
                        "Couldn't open https://a.test/x?token=redacted: refused. Also http://b.test/?q=1")
     }
 
+    // Network reads: credential headers are shown as "redacted" by default.
+    func testCredentialHeadersAreSecret() {
+        for name in ["Cookie", "set-cookie", "Authorization", "Proxy-Authorization", "X-CSRF-Token",
+                     "X-Api-Key", "x-apikey", "X-Auth-User", "X-Session-Id", "X-XSRF-TOKEN", "x-amz-security-token"] {
+            XCTAssertTrue(AgentRules.secretHeader(name), name)
+        }
+        for name in ["Content-Type", "Accept", "User-Agent", "Cache-Control", "Content-Length", "Referer"] {
+            XCTAssertFalse(AgentRules.secretHeader(name), name)
+        }
+    }
+
     // M4: a fresh mouse click, on the control pressed, in its window.
     func testOnlyAFreshClickOnTheControlAnswers() throws {
         _ = NSApplication.shared

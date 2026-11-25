@@ -167,6 +167,50 @@ final class DevToolsFullTests: XCTestCase {
 
     // MARK: - 2. A hostile page sees and reaches nothing
 
+    func test2AgentNetworkCaptureHasScopedHandlesAndYieldsToVisibleInspector() async throws {
+        let tab = try await open("/app")
+        let key = UUID().uuidString
+        let started = try await perform("network_start", ["capture": key, "owner": "agent-a"], tab)
+        XCTAssertEqual(started["capturing"] as? Bool, true, "\(started)")
+        let extra = try await perform("network_start", ["capture": UUID().uuidString, "owner": "agent-a"], tab)
+        XCTAssertEqual(extra["error"] as? String, "too_many_captures")
+        tab.go(to: server.url("/data.json"))
+        try await waitUntil { tab.committed == self.server.url("/data.json") && !tab.loading }
+        try await waitUntil {
+            guard let listed = try? await self.perform("network_requests", ["capture": key], tab) else { return false }
+            return (listed["requests"] as? [[String: Any]])?.contains { ($0["url"] as? String)?.contains("/data.json") == true } == true
+        }
+        let listed = try await perform("network_requests", ["capture": key], tab)
+        let requests = try XCTUnwrap(listed["requests"] as? [[String: Any]])
+        let row = try XCTUnwrap(requests.first { ($0["url"] as? String)?.contains("/data.json") == true })
+        let handle = try XCTUnwrap(row["request"] as? String)
+        let details = try await perform("network_request", ["capture": key, "request": handle], tab)
+        XCTAssertEqual((details["response_body"] as? [String: Any])?["text"] as? String, "{\"ok\":true}")
+        tab.go(to: server.url("/large"))
+        try await waitUntil { tab.committed == self.server.url("/large") && !tab.loading }
+        let largeList = try await perform("network_requests", ["capture": key], tab)
+        let largeRow = try XCTUnwrap((largeList["requests"] as? [[String: Any]])?.first {
+            ($0["url"] as? String)?.contains("/large") == true
+        })
+        let large = try await perform("network_request", ["capture": key,
+                                                           "request": try XCTUnwrap(largeRow["request"] as? String)], tab)
+        let body = try XCTUnwrap(large["response_body"] as? [String: Any], "\(large)")
+        XCTAssertLessThanOrEqual((body["text"] as? String)?.utf8.count ?? .max, 128 << 10)
+        XCTAssertEqual(body["truncated"] as? Bool, true)
+        let wrong = try await perform("network_request", ["capture": key, "request": "rwrong.1"], tab)
+        XCTAssertEqual(wrong["error"] as? String, "stale_request")
+        browser.toggleInspector()
+        let interrupted = try await perform("network_requests", ["capture": key], tab)
+        XCTAssertEqual(interrupted["error"] as? String, "capture_interrupted")
+        browser.toggleInspector()
+        let restarted = UUID().uuidString
+        let again = try await perform("network_start", ["capture": restarted, "owner": "agent-a"], tab)
+        XCTAssertEqual(again["capturing"] as? Bool, true)
+        let stale = try await perform("network_request", ["capture": restarted, "request": handle], tab)
+        XCTAssertEqual(stale["error"] as? String, "stale_request")
+        _ = try await perform("network_stop", ["capture": restarted], tab)
+    }
+
     func test2HostilePageSeesNothing() async throws {
         let tab = try await open("/hostile")
         _ = try await perform("open", ["item": "devtools"], tab)
@@ -317,6 +361,7 @@ final class DevToolsFullTests: XCTestCase {
         "/app.css": .init(type: "text/css", body: "#title { color: rgb(10, 20, 30); margin: 4px; }\n"),
         "/app.js": .init(type: "text/javascript", body: "function compute(n) {\n  const doubled = n * 2;\n  return doubled;\n}\n"),
         "/data.json": .init(type: "application/json", body: "{\"ok\":true}"),
+        "/large": .init(type: "text/plain; charset=utf-8", body: String(repeating: "🙂", count: 40_000)),
         "/hostile": .init(type: "text/html", body: """
             <!doctype html><html lang="en"><title>hostile</title><body>
             <button id="visible">Press</button>

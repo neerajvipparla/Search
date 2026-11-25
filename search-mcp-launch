@@ -1,0 +1,6 @@
+#!/bin/sh
+if ! command -v python3 >/dev/null 2>&1; then
+  printf '%s\n' 'Search MCP needs Python 3. Install Python 3 and reopen your coding agent.' >&2
+  exit 127
+fi
+exec python3 "${0%/*}/search-mcp.py" "$@"

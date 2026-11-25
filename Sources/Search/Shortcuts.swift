@@ -223,9 +223,9 @@ struct Command: Identifiable {
         Command("file.savePage", "Save Page As…", .file, nil) { $0.savePage() },
         Command("file.exportPDF", "Export as PDF…", .file, nil) { $0.exportPDF() },
         Command("file.print", "Print…", .file, KeyCombo("p")) { $0.printPage() },
-        // A coding agent connected (AgentControl): Stop from the keyboard.
-        Command("file.stopAgent", "Stop Agent", .file, KeyCombo(".", option: true, control: true)) { _ in
-            AgentControl.shared.stopSession()
+        // Stop every coding agent from the keyboard.
+        Command("file.stopAgent", "Stop All Agents", .file, KeyCombo(".", option: true, control: true)) { _ in
+            AgentControl.shared.stopAllSessions()
         },
 
         Command("edit.pasteMatchStyle", "Paste and Match Style", .edit, KeyCombo("v", shift: true, option: true)) { _ in

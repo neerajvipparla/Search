@@ -5321,6 +5321,7 @@ final class Browser: NSObject, ObservableObject {
     /// says, as a swipe back that closes a link's tab means to.
     func close(_ tab: Tab, goingBack: Bool = false) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        AgentControl.shared.closed(tab)
         // Its peek, hidden or not, goes with it.
         if peekFrom == tab.id { closePeek() }
         let pair = split(for: tab)
@@ -6808,13 +6809,13 @@ final class Browser: NSObject, ObservableObject {
     /// looking at, and marked as not yours. `shy`: a private one, for a test run.
     /// `agent`: a coding agent's (AgentControl), marked as such.
     @discardableResult
-    func benchOpen(_ url: URL, shy: Bool = false, agent: Bool = false) -> Tab {
+    func benchOpen(_ url: URL, shy: Bool = false, agent: Bool = false, load: Bool = true) -> Tab {
         let url = Browser.page(url)
         let tab = Tab(shy: shy, bench: true, configuration: shy ? nil : Browser.extensionConfiguration(for: url))
         tab.agent = agent
         prepare(tab)
         tabs.append(tab)
-        tab.go(to: url)
+        if load { tab.go(to: url) }
         return tab
     }
 

@@ -673,7 +673,12 @@ final class Bench {
                 case "always": agents.toggleAlways(event: made)
                 default: agents.answer(allow: which == "allow", event: made)
                 }
-            case "stop": agents.stopSession()
+            case "stop":
+                if request["all"] as? Bool == true { agents.stopAllSessions() }
+                else if let client = request["client"] as? String,
+                        let target = agents.orderedSessions.first(where: { $0.client == client }) {
+                    agents.stopSession(target.id)
+                } else { agents.stopSession() }
             // The switch in Settings turned off, as its click would.
             case "off": browser.prefs.agents = false
             default: break

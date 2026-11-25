@@ -83,6 +83,8 @@ final class DeveloperToolsSession: ObservableObject {
     @Published private(set) var forcedStates: [Int: Set<PseudoState>] = [:]
     @Published private(set) var console: [ConsoleLine] = []
     @Published private(set) var requests: [Request] = []
+    private(set) var networkRequestCount = 0
+    var networkRequestLimit = 1_000
     @Published private(set) var resources: [Resource] = []
     @Published private(set) var source: String?
     @Published private(set) var sourceResource: Resource?
@@ -1650,6 +1652,7 @@ final class DeveloperToolsSession: ObservableObject {
     func clearNetwork() {
         requests = []
         requestIndex = [:]
+        networkRequestCount = 0
         Task { _ = try? await bridge("searchInspector.clearRequestDetails?.(); return true;") }
     }
 
@@ -1712,7 +1715,8 @@ final class DeveloperToolsSession: ObservableObject {
                 }
                 network[index] = request
             } else {
-                if network.count >= 1_000 {
+                networkRequestCount += 1
+                if network.count >= networkRequestLimit {
                     network.removeFirst(100)
                     requestIndex = Dictionary(uniqueKeysWithValues: network.enumerated().map { ($1.id, $0) })
                 }

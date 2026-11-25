@@ -61,7 +61,7 @@ final class DeveloperTools: ObservableObject {
             FullPlugin.current?.host?.invalidate()
         }
     }
-    private var closing: Task<Void, Never>?
+    var closing: Task<Void, Never>?
 
     /// The panel's size along the window, kept apart for the bottom and
     /// the sides, as Chrome keeps them.
@@ -77,9 +77,12 @@ final class DeveloperTools: ObservableObject {
 
     @discardableResult
     func open(web: WKWebView, panel: DeveloperPanel, point: NSPoint? = nil) -> DeveloperToolsSession {
+        let interrupted = AgentNetwork.interrupt(web)
         if session?.web !== web || session?.connectionFailed == true {
             close()
-            session = DeveloperToolsSession(web: web, after: closing)
+            let previous = closing
+            let after = Task { await previous?.value; await interrupted?.value }
+            session = DeveloperToolsSession(web: web, after: after)
             DeveloperToolsKeys.install()
             FullPlugin.current?.host?.keepAwake(true, webView: web)
         }

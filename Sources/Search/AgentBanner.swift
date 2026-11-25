@@ -1,13 +1,13 @@
 import SwiftUI
 
-// What the window shows of a coding agent (AgentControl). When one
+// What the window shows of coding agents (AgentControl). When one
 // connects, the question, rising from the foot of the window with the
 // page's own questions, in the window it asked in only. Never anything over
 // the page after that: while it is allowed, the tab it is working in wears
 // a dot on its icon's corner (AgentMark), moving with it from tab to tab and
 // gone once it is idle; Stop is on a card at the foot of the column, drawn
 // as "Update ready" is — or on a pill at the far end of the strip when the
-// tabs are across the top — and in File › Stop Agent, all for as long as it
+// tabs are across the top — and in File › Stop All Agents, for as long as it
 // is connected, and gone with it. Not on the tab's row, where it covered
 // the title.
 //
@@ -25,12 +25,15 @@ struct AgentBar: View {
         Group {
             // Which window it asked in is the session's to say, once it has
             // said hello: watched there, not here.
-            if let session = agents.session {
+            if let session = agents.question(in: browser) {
+                // A view of its own for each question, so its appearing
+                // (questionShown) is when a click on it may count from.
                 AgentSessionBar(session: session, browser: browser)
+                    .id("\(session.id)-\(session.networkAsking)")
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(Motion.settle, value: agents.session?.id)
+        .animation(Motion.settle, value: agents.question(in: browser)?.id)
     }
 }
 
@@ -39,7 +42,7 @@ private struct AgentSessionBar: View {
     let browser: Browser
 
     var body: some View {
-        if session.browser === browser, session.consent.state == .asking {
+        if session.browser === browser, session.consent.state == .asking || session.networkAsking {
             AgentQuestion(session: session)
         }
     }
@@ -56,7 +59,7 @@ struct AgentStatus: View {
     @ObservedObject private var agents = AgentControl.shared
 
     var body: some View {
-        if let session = agents.session, session.browser === browser {
+        ForEach(agents.sessions(in: browser).filter { $0.consent.state == .allowed }) { session in
             AgentStatusFace(session: session, style: style, prefs: browser.prefs)
         }
     }
@@ -77,13 +80,13 @@ private struct AgentStatusFace: View {
         if session.consent.state == .allowed {
             switch style {
             case .icon:
-                Button { AgentControl.shared.stopSession() } label: {
+                Button { AgentControl.shared.stopSession(session.id) } label: {
                     Image(systemName: "stop.circle")
                         .font(.system(size: 13))
                         .foregroundStyle(Palette.muted)
                         .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
-                        .background(ClickSpot { AgentControl.shared.stopButton = $0 })
+                        .background(ClickSpot { session.stopButton = $0 })
                 }
                 .buttonStyle(.plain)
                 .shortcutHelp("\(AgentWords.short(session)). Click to stop it.", "file.stopAgent")
@@ -100,8 +103,8 @@ private struct AgentStatusFace: View {
     }
 
     private var stop: some View {
-        CardButton(title: "Stop", act: { AgentControl.shared.stopSession() }) {
-            ClickSpot { AgentControl.shared.stopButton = $0 }
+        CardButton(title: "Stop", act: { AgentControl.shared.stopSession(session.id) }) {
+            ClickSpot { session.stopButton = $0 }
         }
         .shortcutHelp("Disconnect it. Its tabs stay where they are.", "file.stopAgent")
     }
@@ -217,16 +220,16 @@ struct AgentMark: View {
     }
 }
 
-/// File › Stop Agent: there while one is connected.
+/// File › Stop All Agents: there while any agent is connected.
 struct StopAgentMenuItem: View {
     @ObservedObject private var agents = AgentControl.shared
 
     var body: some View {
-        Button(agents.shownIn == nil ? "Stop Agent" : "Stop \(agents.session?.client ?? "Agent")") {
-            AgentControl.shared.stopSession()
+        Button("Stop All Agents") {
+            AgentControl.shared.stopAllSessions()
         }
         .shortcut("file.stopAgent")
-        .disabled(agents.shownIn == nil)
+        .disabled(agents.sessions.isEmpty)
     }
 }
 
@@ -250,7 +253,7 @@ enum AgentWords {
     }
 }
 
-/// "Claude Code wants to use Search", Allow or Don't Allow.
+/// Initial or network consent, Allow or Don't Allow for the shown session.
 private struct AgentQuestion: View {
     @ObservedObject var session: AgentSession
 
@@ -262,7 +265,7 @@ private struct AgentQuestion: View {
                     .foregroundStyle(Palette.muted)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("“\(session.client)” wants to use Search")
+                    Text(session.networkAsking ? "“\(session.client)” wants to inspect network traffic" : "“\(session.client)” wants to use Search")
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(Palette.ink)
                     Text(detail)
@@ -272,11 +275,12 @@ private struct AgentQuestion: View {
                 }
             }
             // Ticked only by a fresh click on it, as Allow is pressed.
+            if !session.networkAsking {
             Toggle("Let it see my open tabs", isOn: Binding(
                 get: { session.wantsTabs },
-                set: { _ in AgentControl.shared.toggleTabs(event: NSApp.currentEvent) }))
+                set: { _ in AgentControl.shared.toggleTabs(session.id, event: NSApp.currentEvent) }))
                 .toggleStyle(.checkbox)
-                .background(ClickSpot { AgentControl.shared.tabsBox = $0 })
+                .background(ClickSpot { session.tabsBox = $0 })
                 .font(.system(size: 12))
                 .foregroundStyle(Palette.ink)
                 .padding(.leading, 23)
@@ -291,30 +295,31 @@ private struct AgentQuestion: View {
             } else {
                 Toggle("Always allow \(session.client)", isOn: Binding(
                     get: { session.wantsAlways },
-                    set: { _ in AgentControl.shared.toggleAlways(event: NSApp.currentEvent) }))
+                    set: { _ in AgentControl.shared.toggleAlways(session.id, event: NSApp.currentEvent) }))
                     .toggleStyle(.checkbox)
-                    .background(ClickSpot { AgentControl.shared.alwaysBox = $0 })
+                    .background(ClickSpot { session.alwaysBox = $0 })
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.ink)
                     .padding(.leading, 23)
                     .help(alwaysHelp)
             }
+            }
             HStack(spacing: 12) {
                 Spacer(minLength: 8)
-                Button { AgentControl.shared.answer(allow: false, event: NSApp.currentEvent) } label: {
+                Button { AgentControl.shared.answer(session.id, allow: false, event: NSApp.currentEvent) } label: {
                     Text("Don't Allow")
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
                         .contentShape(Rectangle())
-                        .background(ClickSpot { AgentControl.shared.refuseButton = $0 })
+                        .background(ClickSpot { session.refuseButton = $0 })
                 }
-                Button { AgentControl.shared.answer(allow: true, event: NSApp.currentEvent) } label: {
+                Button { AgentControl.shared.answer(session.id, allow: true, event: NSApp.currentEvent) } label: {
                     Text("Allow")
                         .foregroundStyle(Palette.ground)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(Palette.ink, in: Capsule())
-                        .background(ClickSpot { AgentControl.shared.allowButton = $0 })
+                        .background(ClickSpot { session.allowButton = $0 })
                 }
             }
             .font(.system(size: 12))
@@ -327,6 +332,7 @@ private struct AgentQuestion: View {
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
         .shadow(color: .black.opacity(0.12), radius: 20, y: 6)
         .padding(.horizontal, 16)
+        .onAppear { AgentControl.shared.questionShown(session.id) }
     }
 
     private var alwaysHelp: String {
@@ -338,6 +344,9 @@ private struct AgentQuestion: View {
 
     /// The name is the program's own word for itself; this is macOS's.
     private var detail: String {
+        if session.networkAsking {
+            return "Network details can contain cookies, authorization headers, tokens, and private response data. Allow this connection only?"
+        }
         let from = session.program.isEmpty ? "" : "From \(session.program) on this Mac. "
         return from + "It works in tabs of its own while you watch, until you press Stop. "
             + "It never sees passwords, card numbers, private tabs or Settings."

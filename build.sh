@@ -197,6 +197,8 @@ BINARY="$(swift build "${SWIFTFLAGS[@]}" --show-bin-path)/Search"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/$NAME"
+install -m 755 search-mcp-launch "$APP/Contents/Resources/search-mcp"
+install -m 644 search-mcp "$APP/Contents/Resources/search-mcp.py"
 # The binary says which SDK it was built with, and AppKit draws the app the
 # way that SDK's macOS drew it: built with the macOS 27 SDK, a Mac on 27 gets
 # 27's window buttons and controls; said to be built with an older one, it
