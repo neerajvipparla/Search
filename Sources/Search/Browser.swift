@@ -6165,6 +6165,46 @@ final class Browser: NSObject, ObservableObject {
         return id
     }
 
+    /// The section a coding agent's tabs go in, one per agent by name —
+    /// every Claude Code connection's tabs under "Claude", Codex's under
+    /// "Codex", OpenCode's under "OpenCode" — so it is plain which agent has
+    /// which tab. Found by name in this space, or made, in the agent's
+    /// colour. It goes with its last tab, as any group does, and is never
+    /// written down while only an agent's tabs are in it (they aren't kept).
+    func agentGroup(for client: String) -> UUID? {
+        guard prefs.usesTabGroups else { return nil }
+        let name = Browser.agentGroupName(client)
+        if let found = tabGroups.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            return found.id
+        }
+        let group = TabGroup(id: UUID(), name: name, collapsed: false, colour: Browser.agentGroupColour(name))
+        tabGroups.append(group)
+        return group.id
+    }
+
+    /// "Claude Code" → "Claude", "codex-mcp-client" → "Codex", and so on;
+    /// an agent Search doesn't know by the name it gave.
+    nonisolated static func agentGroupName(_ client: String) -> String {
+        let said = client.lowercased()
+        if said.contains("opencode") { return "OpenCode" }
+        if said.contains("claude") { return "Claude" }
+        if said.contains("codex") { return "Codex" }
+        if said.contains("cursor") { return "Cursor" }
+        let trimmed = client.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == "A coding agent" || trimmed == "A program" ? "Agent" : trimmed
+    }
+
+    /// Each known agent its own colour (Spaces.colours), the rest violet.
+    nonisolated static func agentGroupColour(_ name: String) -> Int {
+        switch name {
+        case "Claude": 3    // orange
+        case "Codex": 1     // blue
+        case "OpenCode": 2  // green
+        case "Cursor": 4    // red
+        default: 5          // violet
+        }
+    }
+
     func renameTabGroup(_ id: UUID, to name: String) {
         guard let index = tabGroups.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6807,12 +6847,14 @@ final class Browser: NSObject, ObservableObject {
 
     /// A page for the bench: at the end of the row, behind whatever you are
     /// looking at, and marked as not yours. `shy`: a private one, for a test run.
-    /// `agent`: a coding agent's (AgentControl), marked as such.
+    /// `agent`: a coding agent's (AgentControl), marked as such. `group`:
+    /// the section it goes in, the agent's own (see agentGroup).
     @discardableResult
-    func benchOpen(_ url: URL, shy: Bool = false, agent: Bool = false, load: Bool = true) -> Tab {
+    func benchOpen(_ url: URL, shy: Bool = false, agent: Bool = false, group: UUID? = nil, load: Bool = true) -> Tab {
         let url = Browser.page(url)
         let tab = Tab(shy: shy, bench: true, configuration: shy ? nil : Browser.extensionConfiguration(for: url))
         tab.agent = agent
+        if let group, tabGroups.contains(where: { $0.id == group }) { tab.groupID = group }
         prepare(tab)
         tabs.append(tab)
         if load { tab.go(to: url) }
@@ -9103,6 +9145,8 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             let tab = Tab(bench: true, configuration: configuration)
             tab.agent = true
             tab.opener = from
+            // In its agent's group, beside the tab that opened it.
+            tab.groupID = group(of: opener)
             if clicked { opener.popupGesture.opened(tab.id) }
             prepare(tab)
             tabs.append(tab)

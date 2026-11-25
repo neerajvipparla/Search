@@ -720,6 +720,11 @@ enum SettingsIndex {
               more: "Each time one connects, the window asks you first, unless you ticked “Always allow” for it — offered only for Claude Code's own `claude`, signed by Anthropic; kept 30 days at most and 7 after its last use, never with your tabs, and asked again after you press Stop; forget it here. Nothing is drawn over the page: the tab it works in wears a small dot, and Stop is on the column's foot (or the tab strip) and in File › Stop All Agents (⌃⌥⌘.) until it goes. On from the first launch; off here, it stays off. It works in tabs of its own; your tabs it can read only if you tick “Let it see my open tabs”, and never uses. It never sees passwords, card numbers, one-time codes, private tabs, cookies or Settings, and can't download or choose files. It connects through a file on this Mac only, never the network: claude mcp add search -- /path/to/Search/search-mcp.",
               keys: ["agents"],
               words: ["agent", "ai", "claude", "claude code", "codex", "mcp", "automation", "computer use", "developer"]),
+        .init(id: "agents.unasked", group: "developer", icon: "bolt.horizontal",
+              title: "Let agents in without asking", detail: "No question in the window: an agent gets your open tabs and network capture at once",
+              more: "Any program on this Mac that connects as an agent is let in. Its tabs are grouped under its name (Claude, Codex, OpenCode). Stop still ends it, and it still never sees passwords, card numbers, one-time codes, private tabs, cookies or Settings.",
+              keys: ["agents.unasked"],
+              words: ["agent", "permission", "ask", "allow", "autonomous", "agentic", "claude", "codex", "opencode"]),
 
         // Moved to a menu, or always on: only the find field says so.
         .init(id: "autocorrect", group: "pages", icon: "textformat.abc.dottedunderline",

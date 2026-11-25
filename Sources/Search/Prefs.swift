@@ -186,6 +186,14 @@ final class Preferences: ObservableObject {
     static let agentsDefaulted = SwitchMark(service: "com.officecommun.search.agents.defaulted")
     /// Found on at launch without the mark, and put back to off.
     private(set) var agentsRefused = false
+    /// Coding agents are let in without the question in the window: they
+    /// see your open tabs and may capture their own tabs' network traffic.
+    /// Stop still stops them, and they never see passwords, cards, private
+    /// tabs or Settings. On unless turned off; a test world starts off, so
+    /// the question can still be tested.
+    @Published var agentsUnasked: Bool {
+        didSet { store.set(agentsUnasked, forKey: "agents.unasked") }
+    }
     /// Light, dark, or the Mac's own.
     @Published var look: Look {
         didSet {
@@ -1323,6 +1331,7 @@ final class Preferences: ObservableObject {
             agentsRefused = true
             store.set(false, forKey: "agents")
         }
+        agentsUnasked = store.object(forKey: "agents.unasked") == nil ? !Store.testing : store.bool(forKey: "agents.unasked")
         let chosen = store.string(forKey: "look").flatMap(Look.init) ?? .system
         look = chosen
         homeTheme = store.string(forKey: "home.theme").flatMap(HomeTheme.stored) ?? .off

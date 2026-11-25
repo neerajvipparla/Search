@@ -1061,6 +1061,22 @@ final class AgentControl: ObservableObject {
             guard let self, let session, self.contains(session), session.consent.state == .asking else { return }
             self.end(session, "question timed out")
         }
+        // Settings › "Let agents in without asking": no question at all,
+        // your tabs and network capture included. Stop still ends it.
+        if session.browser?.prefs.agentsUnasked == true {
+            session.auto = true
+            session.networkAllowed = true
+            session.consent.answer(allow: true, seesTabs: true)
+            objectWillChange.send()
+            Self.log.notice("allowed without asking: \(session.client, privacy: .public) (\(session.program, privacy: .public))")
+            admitted(session)
+            let hello = session.hello
+            session.hello = nil
+            hello?(["allowed": true, "seesTabs": true, "unasked": true])
+            began(session)
+            pump(session)
+            return
+        }
         guard let entry = AgentTrust.match(client: session.client, launcher: session.launcher, passed: passed,
                                            among: trust.remembered) else {
             if !trust.requirements(for: session.client).isEmpty {
@@ -1359,7 +1375,7 @@ final class AgentControl: ObservableObject {
                         return
                     }
                 }
-                let tab = browser.benchOpen(url, agent: true, load: false)
+                let tab = browser.benchOpen(url, agent: true, group: browser.agentGroup(for: session.client), load: false)
                 session.own.insert(tab.id)
                 owners[tab.id] = session.id
                 work(on: tab, session)
