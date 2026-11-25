@@ -169,9 +169,10 @@ final class Preferences: ObservableObject {
     /// The setting said on at launch with no mark from the switch behind it,
     /// and was put back to off.
     private(set) var benchRefused = false
-    /// Coding agents may ask to use the window (AgentControl). Off unless
-    /// turned on in Settings, which leaves the mark it needs at launch, as
-    /// the bench's switch does.
+    /// Coding agents may ask to use the window (AgentControl). On from the
+    /// first launch (see init: agentsDefaulted); after that only Settings
+    /// turns it on, leaving the mark it needs at launch, as the bench's
+    /// switch does. Each agent is still asked about in the window.
     @Published var agents: Bool {
         didSet {
             store.set(agents, forKey: "agents")
@@ -181,6 +182,8 @@ final class Preferences: ObservableObject {
         }
     }
     static let agentsMark = SwitchMark(service: "com.officecommun.search.agents")
+    /// Set once, when agents were turned on by default; never removed.
+    static let agentsDefaulted = SwitchMark(service: "com.officecommun.search.agents.defaulted")
     /// Found on at launch without the mark, and put back to off.
     private(set) var agentsRefused = false
     /// Light, dark, or the Mac's own.
@@ -1301,6 +1304,17 @@ final class Preferences: ObservableObject {
         if scripted, !allowed {
             benchRefused = true
             store.set(false, forKey: "bench")
+        }
+        // On by default, once: the first launch that has never had the switch
+        // set turns it on as Settings would, mark and all. Remembered in the
+        // keychain (agentsDefaulted), so deleting the setting later can't
+        // bring it back after you turned it off; a test world starts off.
+        if !Store.testing, store.object(forKey: "agents") == nil,
+           !Preferences.agentsDefaulted.recorded, !store.bool(forKey: "agents.defaulted") {
+            Preferences.agentsMark.grant()
+            Preferences.agentsDefaulted.grant()
+            store.set(true, forKey: "agents.defaulted")
+            store.set(true, forKey: "agents")
         }
         let agentsAsked = store.bool(forKey: "agents")
         let agentsAllowed = agentsAsked && (Store.testing || Preferences.agentsMark.given)

@@ -199,6 +199,19 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/$NAME"
 install -m 755 search-mcp-launch "$APP/Contents/Resources/search-mcp"
 install -m 644 search-mcp "$APP/Contents/Resources/search-mcp.py"
+# Developer Tools Full built in, for coding agents' network capture
+# (DevToolsPackages.builtIn): sealed by the app's signature below, which
+# --deep re-signs it under. The menus still offer the download as before.
+# SEARCH_NO_BUILTIN_DEVTOOLS=1 leaves it out.
+if [ -z "${SEARCH_NO_BUILTIN_DEVTOOLS:-}" ]; then
+  PKG_SIGNER="${SEARCH_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)}"
+  SEARCH_SIGN_IDENTITY="${PKG_SIGNER:--}" build_devtools DevToolsFull
+  mkdir -p "$APP/Contents/PlugIns"
+  ditto "$OUT/devtools/DevToolsFull.bundle" "$APP/Contents/PlugIns/DevToolsFull.bundle"
+  plutil -convert json -o "$APP/Contents/PlugIns/DevToolsFull.bundle/Contents/Resources/package.json" \
+    Sources/DevToolsFull/package.json
+fi
 # The binary says which SDK it was built with, and AppKit draws the app the
 # way that SDK's macOS drew it: built with the macOS 27 SDK, a Mac on 27 gets
 # 27's window buttons and controls; said to be built with an older one, it

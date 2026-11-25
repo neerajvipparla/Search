@@ -1255,6 +1255,14 @@ final class AgentControl: ObservableObject {
                     answer(AgentRefusal(code: "stale_page", message: "The tab closed or the agent stopped").said)
                     return
                 }
+                if result["error"] as? String == "unknown command" {
+                    // A Developer Tools Full from before agents' capture.
+                    session.networkCaptures[tab.id] = nil
+                    answer(AgentRefusal(code: "network_tools_unavailable",
+                                        message: "This Developer Tools Full is too old for agent network capture",
+                                        hint: "Update Developer Tools Full in Search Settings › About › Developer.").said)
+                    return
+                }
                 if let code = result["error"] as? String {
                     if command == "network_start" || code == "capture_interrupted" { session.networkCaptures[tab.id] = nil }
                     let hint: String = switch code {

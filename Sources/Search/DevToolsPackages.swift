@@ -190,6 +190,31 @@ final class DevToolsPackages: ObservableObject {
         return found
     }
 
+    /// Packages built into Search.app (build.sh): Contents/PlugIns/<Name>.bundle
+    /// with its package.json in Resources. Not listed as installed — the
+    /// menus and keys stay as they are — but loaded for what asks for the
+    /// package by id (coding agents' network capture) when nothing newer is
+    /// downloaded. Never removed: Remove only touches the downloaded copy.
+    private(set) lazy var builtIn: [String: Installed] = {
+        guard let plugins = Bundle.main.builtInPlugInsURL else { return [:] }
+        var found: [String: Installed] = [:]
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: plugins.path)) ?? [] where name.hasSuffix(".bundle") {
+            let bundle = plugins.appendingPathComponent(name, isDirectory: true)
+            guard let data = try? Data(contentsOf: bundle.appendingPathComponent("Contents/Resources/package.json")),
+                  var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            // What only a download has; its seal is the app's signature.
+            let none = String(repeating: "0", count: 64)
+            json["url"] = Bundle.main.bundleURL.absoluteString
+            json["sha256"] = none
+            json["binary"] = none
+            json["size"] = 1
+            guard let offer = DevToolsOffer(json: json, link: { ($0 as? String).flatMap(URL.init(string:)) }),
+                  found[offer.id] == nil else { continue }
+            found[offer.id] = Installed(offer: offer, bundle: bundle)
+        }
+        return found
+    }()
+
     private func rescan() {
         scanned = nil
         objectWillChange.send()
@@ -246,7 +271,10 @@ final class DevToolsPackages: ObservableObject {
     }
 
     /// The bundle checked as it is on disk now (see the top of the file).
-    nonisolated static func verify(_ bundle: URL, offer: DevToolsOffer, release: Bool) throws {
+    /// `builtIn`: a package inside this app (Contents/PlugIns), sealed by the
+    /// app's own signature, which is checked whole instead of a feed's hash;
+    /// signed by Office Commun's Developer ID if the app is.
+    nonisolated static func verify(_ bundle: URL, offer: DevToolsOffer, release: Bool, builtIn: Bool = false) throws {
         let files = FileManager.default
         guard let info = NSDictionary(contentsOf: bundle.appendingPathComponent("Contents/Info.plist")) as? [String: Any],
               let name = info["CFBundleExecutable"] as? String, !name.contains("/") else { throw Refused.missing }
@@ -254,7 +282,19 @@ final class DevToolsPackages: ObservableObject {
         guard let kind = try? executable.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
               kind.isRegularFile == true, kind.isSymbolicLink != true, files.isReadableFile(atPath: executable.path)
         else { throw Refused.missing }
-        guard try digest(executable) == offer.binary else { throw Refused.hash }
+        var release = release
+        if builtIn {
+            guard let plugins = Bundle.main.builtInPlugInsURL?.standardizedFileURL.path,
+                  bundle.standardizedFileURL.deletingLastPathComponent().path == plugins else { throw Refused.missing }
+            var app: SecStaticCode?
+            let whole = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckNestedCode)
+            guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &app) == errSecSuccess, let app,
+                  SecStaticCodeCheckValidity(app, whole, nil) == errSecSuccess else { throw Refused.signature }
+            release = Updater.developerID(team: Updater.team, identifier: nil)
+                .map { SecStaticCodeCheckValidity(app, [], $0) == errSecSuccess } ?? false
+        } else {
+            guard try digest(executable) == offer.binary else { throw Refused.hash }
+        }
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(bundle as CFURL, [], &code) == errSecSuccess, let code else { throw Refused.signature }
         let requirement: SecRequirement?
@@ -293,9 +333,15 @@ final class DevToolsPackages: ObservableObject {
     /// in Settings saying why) if they fail.
     func plugin(_ id: String) -> SearchDevToolsPlugin? {
         if let made = loaded[id] { return made }
-        guard let kept = installed[id] else { return nil }
+        // The one built into the app unless a newer one was downloaded: one
+        // copy of a package is ever loaded (its classes have one name).
+        let downloaded = installed[id]
+        let inside = builtIn[id].flatMap { kept in
+            downloaded.map { kept.offer.version >= $0.offer.version } ?? true ? kept : nil
+        }
+        guard let kept = inside ?? downloaded else { return nil }
         do {
-            try Self.verify(kept.bundle, offer: kept.offer, release: !Self.testing)
+            try Self.verify(kept.bundle, offer: kept.offer, release: !Self.testing, builtIn: inside != nil)
             guard let bundle = Bundle(url: kept.bundle), bundle.load(),
                   let kind = bundle.principalClass as? SearchDevToolsPlugin.Type else { throw Refused.notAPackage }
             guard kind.apiVersion == SearchDevToolsAPI.version else {

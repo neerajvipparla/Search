@@ -131,7 +131,7 @@ agy mcp add --type stdio search-bench "$PWD/bench-mcp"
 
 Each session starts this checkout's `build/Search.app` hidden, in a test world of its own, and wipes that world when it closes; the browser you use is never in reach. Its tools read a page as roles and names, or as an outline of its sections to open one at a time, click with real mouse events, type and check what the field holds, and wait on a condition, and a handle that has gone stale or a button that is covered is an error, never a guess. `python3 Tests/bench_mcp.py` checks it end to end.
 
-To let Claude Code, Codex, or OpenCode use the Search you have open, turn on **Settings › About › Developer › Let coding agents use Search** once. Search starts its local control socket automatically each time you open the browser. Register the helper once in each client you use (adjust the app path if Search is installed elsewhere):
+Claude Code, Codex, and OpenCode can use the Search you have open. **Let coding agents use Search** (Settings › About › Developer) is on from the first launch, so Search starts its local control socket every time it opens; turn it off there and it stays off. Register the helper once in each client you use (adjust the app path if Search is installed elsewhere):
 
 ```sh
 claude mcp add -s user search -- /Applications/Search.app/Contents/Resources/search-mcp
@@ -139,7 +139,7 @@ codex mcp add search -- /Applications/Search.app/Contents/Resources/search-mcp
 opencode mcp add search --global -- /Applications/Search.app/Contents/Resources/search-mcp
 ```
 
-For a developer build, use the absolute path to this checkout's `search-mcp` instead. The helper needs Python 3; it starts automatically when a client calls a tool. Search asks before each new connection, shows each allowed agent with its own Stop control, and provides **File › Stop All Agents**. Each agent works in its own tabs. `network_start` asks separately before exposing network headers or bodies; it needs the optional Developer Tools Full package installed in Search. `network_request` shows cookie, authorization and token-like header values as `redacted` unless called with `raw_headers: true`; bodies are returned as they are, capped at 128 KiB. Use `open_tab` with `capture_network: true` to capture the first navigation. `python3 Tests/agent_control.py` checks the browser controls in a hidden probe.
+The helper needs Python 3; the client starts it when it calls a tool. Search still asks in the window before each new connection, shows each allowed agent with its own Stop, and has **File › Stop All Agents**. Each agent works in its own tabs. Network capture (`network_start`, or `open_tab` with `capture_network: true` to record the first load) asks once more per connection, and uses the Developer Tools Full built into the app (`Contents/PlugIns`, sealed by the app's signature; `SEARCH_NO_BUILTIN_DEVTOOLS=1 ./build.sh` leaves it out, about 10 MB). `network_request` shows cookie, authorization and token-like header values as `redacted` unless called with `raw_headers: true`; bodies come as they are, capped at 128 KiB. `python3 Tests/agent_control.py` checks the browser controls in a hidden probe.
 
 `python3 Tests/split_view.py`, after `./build.sh`, checks Split View through the app's own model in a hidden test run with its own settings and files, all removed afterwards. It never makes or shows a window; what can only be seen (dragging onto a page's edge, the divider under the pointer, the motion) is checked by hand on a release candidate.
 
