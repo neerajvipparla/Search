@@ -566,10 +566,31 @@ struct SwitchMark {
     /// without Search's provisioning profile has no access group, and
     /// keeps the switch as it always was.
     var given: Bool {
+        guard Self.keepable else { return true }
         var asked = query
         asked[kSecReturnAttributes as String] = true
         let status = SecItemCopyMatching(asked as CFDictionary, nil)
         return status == errSecSuccess || status == errSecMissingEntitlement
+    }
+
+    /// Whether this copy can keep a mark at all: the data protection
+    /// keychain needs the application identifier its signature carries (a
+    /// provisioned build's). An ad-hoc build has none — the keychain then
+    /// answers "not found" rather than "missing entitlement", which read as
+    /// a switch turned on outside Settings at every launch. Read from the
+    /// signature, which nothing that only writes settings can change.
+    static let keepable: Bool = {
+        guard let task = SecTaskCreateFromSelf(nil) else { return false }
+        return SecTaskCopyValueForEntitlement(task, "com.apple.application-identifier" as CFString, nil) != nil
+    }()
+
+    /// The mark is really there: false where there is nowhere to keep one
+    /// (the caller falls back to a setting).
+    var recorded: Bool {
+        guard Self.keepable else { return false }
+        var asked = query
+        asked[kSecReturnAttributes as String] = true
+        return SecItemCopyMatching(asked as CFDictionary, nil) == errSecSuccess
     }
 
     func grant() {
