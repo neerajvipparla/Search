@@ -15,6 +15,9 @@ in [ROADMAP.md](ROADMAP.md).
 
 - Settings › Keyboard & Mouse › Backspace goes back, off unless turned on: ⌫ goes back a page and ⇧⌫ forward, as older browsers did, only when you aren't typing in a field or editable text and with no other key held. Pages already open follow the switch at once. Found by searching Settings for "backspace". `python3 Tests/backspace_back.py` (idea 1120)
 - Settings › Spaces & Pins › Hide the page behind the field, off unless turned on: ⌘T's and ⌘L's field comes over a plain ground, the page out of sight, instead of the page dimmed and showing through, which some find busy. With The field in the middle of the window too. A plain cover, nothing worked out from the page, so it costs nothing while the page moves. (idea 1061)
+- Coding agents' tabs are grouped by agent: every Claude Code connection's tabs go in one "Claude" group, Codex's in "Codex", OpenCode's in "OpenCode", each in its own colour, so it's plain which agent has which tab. Pages they open follow them into the group.
+- Settings › Developer › Let agents in without asking, on: an agent that connects is let in at once, with your open tabs and network capture, and no question in the window. Stop still ends it. `python3 Tests/agent_unasked.py`
+- `install-mcp.sh` registers Search's MCP helper with every one of Claude Code, Codex and OpenCode it finds on the Mac.
 
 ### Fixed
 
